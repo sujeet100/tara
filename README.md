@@ -97,6 +97,10 @@ layers below matter for the car and away-from-desk cases.
 
 ## Phone-side setup (do these once, on your iPhone)
 
+See **`IPHONE.md`** for the full driving setup (agenda shortcut, CarPlay/Bluetooth
+auto-speak, Announce Notifications, "Hey Siri, Tara" Q&A). Quick essentials:
+
+
 1. **Apple Watch** — Watch app → Sounds & Haptics → **Prominent Haptics** on; add a 2nd alert per important event.
 2. **CarPlay voice** — Settings → Notifications → **Announce Notifications** → on + CarPlay; enable **Calendar**.
 3. **Siri agenda** — Settings → Calendar → Accounts → add Google. Then "Hey Siri, what's my schedule today?" works in the car (English).
