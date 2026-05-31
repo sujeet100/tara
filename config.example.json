@@ -1,0 +1,38 @@
+{
+  "timezone": "Asia/Kolkata",
+  "name": "Your Name",
+  "assistant_name": "Tara",
+  "name_frequency": 0.4,
+  "my_email": "you@example.com",
+  "tts": {
+    "engine": "edge",
+    "edge_voice": "en-IN-NeerjaExpressiveNeural",
+    "edge_rate": "-3%",
+    "say_voice": "Tara",
+    "say_rate": 175
+  },
+  "lead_times_min": [5, 2],
+  "overlay_lead_min": 1,
+  "overdue_nag_minutes": 12,
+  "fetch_interval_sec": 300,
+  "index_window_hours": 36,
+  "index_rebuild_hours": 6,
+  "stale_alert_after_min": 60,
+  "stale_realert_every_min": 30,
+  "work_hours": { "start": "08:00", "end": "21:00" },
+  "briefing_time": "07:30",
+  "snooze_min": 1,
+  "overlay_theme": "sunrise",
+  "lunch": {
+    "enabled": true,
+    "earliest": "12:30",
+    "latest": "14:00",
+    "min_minutes": 20
+  },
+  "rsvp": {
+    "accepted": "full",
+    "needs_action": "remind",
+    "tentative": "remind",
+    "declined": "skip"
+  }
+}

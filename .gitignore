@@ -1,0 +1,21 @@
+# ── secrets (NEVER commit) ─────────────────────────────
+.env
+calendar-url.txt
+
+# ── personal config (copy config.example.json → config.json) ──
+config.json
+
+# ── your calendar data & runtime state ─────────────────
+cache/
+events.json
+state.json
+runtime/
+logs/
+
+# ── build artifacts / environment ──────────────────────
+venv/
+bin/
+__pycache__/
+*.pyc
+*.mp3
+.DS_Store
