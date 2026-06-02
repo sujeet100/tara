@@ -264,6 +264,20 @@ def mic_in_use() -> bool:
     return False
 
 
+def cam_in_use() -> bool:
+    """Camera-active signal (CoreMediaIO). A strong 'really here' cue when Sujit
+    turns video on — but he doesn't always, so it only ever strengthens, never
+    gates, join detection."""
+    camcheck = BIN / "camcheck"
+    if camcheck.exists():
+        try:
+            out = subprocess.run([str(camcheck)], capture_output=True, text=True, timeout=5)
+            return out.stdout.strip() == "1"
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
 def zoom_in_meeting() -> bool:
     try:
         out = subprocess.run(["/usr/bin/pgrep", "-x", "CptHost"],
@@ -273,8 +287,27 @@ def zoom_in_meeting() -> bool:
         return False
 
 
-def has_joined() -> bool:
-    return mic_in_use() or zoom_in_meeting()
+def joined_for(ev_start, now, *, mic_active, mic_on_since, zoom_live, max_lead,
+               cam_active=False, cam_on_since=None):
+    """True only if Sujit has actually joined THIS meeting.
+
+    Zoom's in-call helper (CptHost) is a hard yes. Mic and camera are weaker
+    signals: each counts only if the device went live *recently* — within
+    ~max_lead+2 min of the start. A device held open for hours by a background app
+    (a Slack huddle, OBS, a VM, a stray Meet tab) is NOT a join; trusting it
+    silently stood every meeting down, the exact silent-failure mode this app
+    exists to kill. Camera is a strong "really here" cue when he turns video on,
+    but he doesn't always — so it's an OR with the mic, never required. `now` is
+    accepted for symmetry/future use though the test is start-relative.
+    """
+    if zoom_live:
+        return True
+
+    def recent(active, on_since):
+        return bool(active and on_since
+                    and on_since > ev_start - timedelta(minutes=max_lead + 2))
+
+    return recent(mic_active, mic_on_since) or recent(cam_active, cam_on_since)
 
 
 # --------------------------------------------------------------------------- #
@@ -634,6 +667,29 @@ def tick() -> None:
 
     now = datetime.now(tz)
     lead_times = sorted(cfg["lead_times_min"], reverse=True)
+    max_lead = lead_times[0] if lead_times else 5
+
+    # --- device tracking for rising-edge join detection -------------------- #
+    # The mic/camera "is running" flags are unreliable as a bare join signal: a
+    # Slack huddle, OBS, a VM, or a stray Meet tab can hold a device open for
+    # hours, which used to read as "joined" and silently stand every meeting down
+    # (voice still fired, but the overlay/nag never did — the bug). So we record
+    # WHEN each device first went live and only trust it as a join if that was
+    # recent (see joined_for). on_since is cleared the moment the device goes idle.
+    dev = state.setdefault("devices", {})
+    mic_active, cam_active = mic_in_use(), cam_in_use()
+    for name, active in (("mic", mic_active), ("cam", cam_active)):
+        if active:
+            dev.setdefault(name, {})
+            if not dev[name].get("on_since"):
+                dev[name]["on_since"] = now.isoformat()
+        else:
+            dev[name] = {"on_since": None}
+    mic_on_since = (datetime.fromisoformat(dev["mic"]["on_since"])
+                    if dev.get("mic", {}).get("on_since") else None)
+    cam_on_since = (datetime.fromisoformat(dev["cam"]["on_since"])
+                    if dev.get("cam", {}).get("on_since") else None)
+    zoom_live = zoom_in_meeting()
 
     live_keys = set()
     for ev in events:
@@ -662,13 +718,12 @@ def tick() -> None:
         snooze_until = state["snooze"].get(key)
         snoozed = snooze_until and now < datetime.fromisoformat(snooze_until)
 
-        # auto-detect join → silently stop nagging
-        in_nag_window = mins_to <= cfg["overlay_lead_min"]
-        if in_nag_window and has_joined():
-            state["acked"][key] = now.isoformat()
-            kill_overlay(state["overlay"].get(key, {}).get("pid"))
-            log.info("join detected for %r — standing down", ev["title"])
-            continue
+        # Has Sujit actually joined THIS meeting? (recency-aware — a device held
+        # open for hours doesn't count; see joined_for.)
+        joined = joined_for(ev["start"], now, mic_active=mic_active,
+                            mic_on_since=mic_on_since, cam_active=cam_active,
+                            cam_on_since=cam_on_since, zoom_live=zoom_live,
+                            max_lead=max_lead)
 
         # spoken pre-alerts (fire each lead time once)
         fired = state["fired"].setdefault(key, {})
@@ -683,13 +738,30 @@ def tick() -> None:
                     speak(pick("lead", cfg, title=ev["title"], mins=mins_phrase), cfg)
                     break
 
-        # overlay appears ~1 min before and persists with live countdown
-        if not snoozed and mins_to <= cfg["overlay_lead_min"]:
-            rec = state["overlay"].get(key, {})
-            if not pid_alive(rec.get("pid")):
-                pid = launch_overlay(sid, ev["title"], ev["start"].isoformat(),
-                                     ev["url"], theme=cfg.get("overlay_theme", "midnight"))
-                state["overlay"][key] = {"pid": pid, "launched": now.isoformat()}
+        # The full-screen overlay ALWAYS appears at overlay_lead_min and persists
+        # with a live countdown. It is NOT gated on the mic/camera — suppressing the
+        # visual interrupt on a flaky signal was the silent-failure bug. Once we
+        # deliberately dismiss it (genuine join), `dismissed` stops it relaunching.
+        rec = state["overlay"].get(key, {})
+        had_overlay = pid_alive(rec.get("pid"))
+        if (not snoozed and mins_to <= cfg["overlay_lead_min"]
+                and not had_overlay and not rec.get("dismissed")):
+            pid = launch_overlay(sid, ev["title"], ev["start"].isoformat(),
+                                 ev["url"], theme=cfg.get("overlay_theme", "midnight"))
+            state["overlay"][key] = {"pid": pid, "launched": now.isoformat()}
+
+        # Genuine join → stand down (dismiss overlay + stop nagging), but only once
+        # the overlay has already had its turn on screen (it was alive coming into
+        # this tick). That guarantees the popup shows at least once before any join
+        # signal can cancel it — the visual interrupt can never be silently skipped.
+        if joined and had_overlay:
+            state["acked"][key] = now.isoformat()
+            kill_overlay(rec.get("pid"))
+            rec.update({"dismissed": True})
+            rec.pop("pid", None)
+            state["overlay"][key] = rec
+            log.info("join detected for %r — standing down", ev["title"])
+            continue
 
         # auto-open the link once, at start time
         if mins_to <= 0 and key not in state["opened"]:
@@ -701,7 +773,8 @@ def tick() -> None:
 
         # escalating overdue nag — ONLY for meetings you've accepted ('full').
         # For 'remind' (maybe / not-responded) we stop after the start nudge.
-        if not snoozed and mins_to <= 0 and level == "full":
+        # Skip if he's joined (the rare same-tick case the standdown above misses).
+        if not snoozed and not joined and mins_to <= 0 and level == "full":
             last_nag = fired.get("nag")
             if not last_nag or (now - datetime.fromisoformat(last_nag)).total_seconds() >= 55:
                 overdue_min = -mins_to
