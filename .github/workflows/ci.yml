@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          python tests/test_join.py
+          python tests/test_wrapup.py
+
+      - name: Compile Swift helpers
+        run: |
+          mkdir -p bin
+          swiftc -O overlay.swift  -o bin/overlay
+          swiftc -O miccheck.swift -o bin/miccheck
+          swiftc -O camcheck.swift -o bin/camcheck
+          swiftc -O toast.swift    -o bin/toast
+
+      - name: Shell syntax check
+        run: bash -n install.sh && bash -n uninstall.sh && bash -n preview-theme.sh

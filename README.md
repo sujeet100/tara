@@ -1,106 +1,153 @@
-# Meeting Assistant
+# Tara — a warm, nagging meeting assistant for macOS
 
-A warm-but-nagging personal assistant that makes sure you actually join your
-meetings — on your Mac (voice + auto-open + full-screen overlay + escalating
-nag) and, via the phone-side setup below, in the car and on your wrist.
+A personal assistant that makes sure you **actually join your meetings**. She
+speaks to you, takes over your screen, opens the link for you, and — if you
+still don't join — gets progressively, caringly upset about it.
 
-She speaks in a consistent caring voice whose **tone escalates**: gentle nudge →
-firm → mildly upset (and always uses your name when annoyed). One of ~20 phrase
-variations per situation is picked at random, so you never hear the same line
-two days running.
+Built because ordinary reminders failed me: I'd go deep into work, ignore every
+banner and badge, and surface fifteen minutes into a meeting I'd missed. Worse,
+my previous calendar tool failed *silently* when its auth expired — no popup, no
+warning, just missed meetings. Tara is designed around three principles, in
+priority order:
 
-## Setup on a fresh Mac
+1. **Interrupt a sense you aren't using.** Voice in your ears and a full-screen
+   overlay in your eyes — not another silent banner in a corner.
+2. **Persist and escalate.** Don't fire once and give up; nag, escalating in
+   tone, until you actually join.
+3. **Fail loud, never silent.** If the calendar can't be read, she says so out
+   loud and throws a red overlay. She never just goes quiet.
+
+Her voice is constant — warm, caring, personally invested — but her **tone
+escalates**: gentle nudge → firm → genuinely upset (she always uses your name
+when she's annoyed). Every situation has ~20 phrase variations picked at
+random, so you never hear the same line two days running.
+
+## Requirements
+
+- macOS 13+ (Apple Silicon or Intel), with Xcode Command Line Tools (`swiftc`)
+- Python 3.10+
+- A calendar that publishes an **iCal (.ics) feed URL** — Google Calendar's
+  "Secret address in iCal format" works perfectly (no OAuth, never expires),
+  and so does any other https .ics feed (Outlook publishes them too)
+
+## Install
 
 ```bash
 git clone https://github.com/sujeet100/tara.git ~/.meeting-assistant
-cd ~/.meeting-assistant && ./install.sh
-# then put your Google Calendar secret iCal URL in .env:
-#   CALENDAR_ICAL_URL=https://calendar.google.com/calendar/ical/.../private-XXXX/basic.ics
+cd ~/.meeting-assistant
+./install.sh                          # venv, Swift helpers, launchd agents
+venv/bin/python brain.py --setup      # guided: your name + calendar URL (validated live)
 ```
 
-## How it works (the design in one paragraph)
+That's it. The brain ticks every minute from then on, surviving reboots.
+Google Calendar feed URL: Settings → *your calendar* → **Integrate calendar** →
+**Secret address in iCal format**. Treat it like a password — it's stored in
+`.env` (chmod 600, gitignored).
 
-A **periodic** launchd agent (`brain.py`) runs every 60s as a fresh, short-lived
-process — launchd is its watchdog, so it can't hang silently the way a daemon
-can (that silent-failure mode is exactly the Dato problem we set out to kill).
-Each tick reads a tiny cached event index, decides what to alert, fires voice +
-a detached full-screen overlay, and exits. The overlay is its own GUI process
-with a 1-second timer, so it persists and counts down on its own. A separate,
-decoupled menu-bar app (`menubar.py`) shows health and preferences — if it dies
-you lose the icon, never the alarms.
+## What she does
 
-**Fail loud, not silent:** if the calendar can't be read for >60 min during work
-hours, she says so out loud and throws a red overlay, instead of going quiet.
+- **Morning briefing** (default 07:30): greeting, today's agenda with **one-off
+  meetings called out first** (the ones you forget), then a nudge about invites
+  you haven't answered.
+- **Voice pre-alerts** at 5 and 2 minutes before each meeting, plus a small
+  self-dismissing **corner toast** (click it to join).
+- **Full-screen "Daybreak" overlay** 3 minutes before: themed sky, live
+  countdown with a depleting progress ring, Join / I'm in / Snooze buttons,
+  ⏎ joins, esc snoozes. One per screen. When the meeting starts without you,
+  **the sky burns red and pulses** — the visuals escalate like her voice.
+- **Auto-opens** the Meet/Zoom/Teams link at start time (accepted meetings only).
+- **Escalating voice nag** after start — gentle, then firm, then upset — until
+  you join or 12 minutes pass.
+- **Join detection, app-agnostic:** your mic or camera going live *near meeting
+  time* (Zoom, Meet in any browser, Teams — no permissions needed; device state
+  only), or Zoom's in-call process, or the "I'm in" button. A mic held open for
+  hours by some background app deliberately does **not** count.
+- **Wrap-up warning** ~5 minutes before the *current* meeting ends when another
+  follows soon: "about 5 minutes left — Design review is at 2:00."
+- **Lunch nudge** at the last good gap before afternoon meetings; a caring
+  warning if you're booked straight through.
+- **RSVP-aware:** declined meetings are skipped entirely; tentative /
+  not-responded get a lighter touch (no auto-open, no nagging).
+- **Fail-loud:** calendar unreadable for >60 min during work hours → she says so
+  and shows a red overlay, repeating every 30 min until fixed.
+
+## The design in one paragraph
+
+A **periodic** launchd agent (`brain.py`) runs every 60 seconds as a fresh,
+short-lived process — launchd is its watchdog, so it cannot hang silently the
+way a daemon can (that silent-failure mode is exactly what this project exists
+to kill). Each tick reads a tiny cached event index (the 12 MB feed is parsed
+only when it changes), decides what to alert, fires its channels, and exits.
+The overlay and toast are detached GUI processes that live on their own; voice
+runs through per-utterance workers that synthesize in parallel but **queue
+playback** so announcements never talk over each other. A decoupled menu-bar
+app (`menubar.py`, 🌸) shows health and preferences — if it dies you lose the
+icon, never the alarms.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `brain.py` | The periodic tick: fetch, decide, alert. |
-| `overlay.swift` → `bin/overlay` | Full-screen attention window (themed, live countdown). |
-| `miccheck.swift` → `bin/miccheck` | Detects if the mic is live = you're in a call (join detection). |
-| `menubar.py` | Menu-bar health indicator + Preferences. |
-| `phrases.json` | ~300 persona lines, 20 per situation. |
-| `config.json` | All your settings. |
-| `.env` | Your secret iCal feed URL (`CALENDAR_ICAL_URL`, chmod 600, gitignored). |
-| `events.json` / `cache/last.ics` | Cached calendar (so ticks are instant). |
-| `state.json` | What's already fired / acked / snoozed. |
-| `logs/assistant.log` | What she's doing. |
+| `brain.py` | The periodic tick: fetch → decide → alert. Also `--setup`, `--briefing`, `--status`. |
+| `voice.py` | Per-utterance voice worker (edge-tts, `say` fallback, queued playback). |
+| `overlay.swift` → `bin/overlay` | Full-screen Daybreak alert (countdown ring, escalating sky). |
+| `toast.swift` → `bin/toast` | Corner popup, self-dismissing, click-to-join. |
+| `miccheck.swift` / `camcheck.swift` | Mic/camera-active join signals (device state only, no capture). |
+| `menubar.py` | 🌸 health + Preferences + Stop/Resume. |
+| `phrases.json` | The persona: ~20 lines per situation. Edit freely — this is where Tara lives. |
+| `config.json` | All settings; the brain re-reads it every tick. |
+| `.env` | Your secret iCal URL (`CALENDAR_ICAL_URL`). |
 
-## What she does
+## Preferences
 
-- **Pre-alerts** at 5 and 2 minutes before (voice).
-- **Full-screen overlay** ~1 min before, with a live countdown and Join / I'm-in / Snooze buttons. Floats above everything, including full-screen apps.
-- **Auto-opens** the Zoom/Meet/Teams link at start time (accepted meetings only).
-- **Escalating nag** every minute after start until you join — detected automatically when your **mic goes live** (covers Zoom, Meet PWA in Brave, Arc, Teams) or you click a button.
-- **Morning briefing** (~07:30) reads today's agenda, calling out **one-off** meetings first (the ones you forget) and reminding you of **unanswered invites**.
-- **Lunch nudge** at the last good gap before afternoon meetings ("free until your 2 PM — go eat now").
-- **RSVP-aware:** declined meetings are ignored; not-responded / maybe get a lighter touch (no auto-open, no nagging).
+From the 🌸 menu: theme, voice, how often she uses your name, lunch reminders
+on/off, calendar link, your name, read today's agenda, preview theme, test
+alert, and **Stop/Resume Tara** (a hard off switch that survives reboots).
 
-## Preferences (menu bar 🗓️)
-
-Theme · Voice · Name frequency · Lunch on/off · Set calendar link · Set your
-name · Read today's agenda · Preview theme · Test alert · Open config folder.
-Changes write to `config.json` and take effect within a minute.
-
-You can also edit `config.json` directly. Themes: `midnight`, `sunrise`,
-`forest`, `grape`, `mono`. Preview one: `./preview-theme.sh sunrise` (or `all`).
+Or edit `config.json` directly — lead times, overlay lead, nag duration, work
+hours, briefing time, lunch window, wrap-up window, toast lifetime, RSVP
+behaviour, timezone (auto-detected if absent). Overlay themes: `midnight`,
+`sunrise`, `forest`, `grape`, `mono`, `glass` — preview with
+`./preview-theme.sh sunrise` (or `all`).
 
 ## Voice
 
-Neural **edge-tts** (`en-IN-NeerjaExpressiveNeural`) — free, no API key — with
-macOS `say` (Tara) as an automatic **offline fallback** so a network blip never
-loses a reminder.
+Neural **edge-tts** (`en-IN-NeerjaExpressiveNeural` by default — pick any Edge
+voice) with macOS `say` as an automatic offline fallback, so a network blip
+never loses a reminder. Note: edge-tts uses Microsoft Edge's online TTS
+unofficially — it's free and needs no key, but could break someday; the `say`
+fallback keeps Tara talking if it does.
 
 ## Controlling it
 
 ```bash
-# pause for the day
-launchctl bootout gui/$(id -u)/com.sujitk.meeting-assistant.brain
-# resume
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sujitk.meeting-assistant.brain.plist
-# run a tick by hand / hear the briefing
-~/.meeting-assistant/venv/bin/python ~/.meeting-assistant/brain.py --tick
-~/.meeting-assistant/venv/bin/python ~/.meeting-assistant/brain.py --briefing
-# health
-~/.meeting-assistant/venv/bin/python ~/.meeting-assistant/brain.py --status
-# logs
-tail -f ~/.meeting-assistant/logs/assistant.log
-# remove everything
-~/.meeting-assistant/uninstall.sh
+venv/bin/python brain.py --tick        # run one tick by hand
+venv/bin/python brain.py --briefing    # hear the morning briefing now
+venv/bin/python brain.py --status      # health
+tail -f logs/assistant.log
+# pause / resume: use the 🌸 menu (Stop Tara / Resume Tara), or:
+launchctl bootout gui/$(id -u)/com.tara-assistant.brain
+./uninstall.sh                         # remove agents (keeps your files)
 ```
 
-## Caveat
+Tests: `venv/bin/python tests/test_join.py && venv/bin/python tests/test_wrapup.py`
 
-The Mac brain only runs while the Mac is awake — which is why the phone-side
-layers below matter for the car and away-from-desk cases.
+## Caveats
 
-## Phone-side setup (do these once, on your iPhone)
+- The Mac brain only runs while the Mac is awake. For the car and
+  away-from-desk, set up the phone-side layers in **`IPHONE.md`** (Apple Watch
+  prominent haptics, CarPlay Announce Notifications, Siri agenda).
+- Just-added meetings can take a few minutes to appear in Google's secret feed.
+- The menu-bar app runs as a plain script, so it won't appear in System
+  Settings → "Allow in the Menu Bar", and its icon can hide behind the notch on
+  a full bar (⌘-drag icons to make room).
 
-See **`IPHONE.md`** for the full driving setup (agenda shortcut, CarPlay/Bluetooth
-auto-speak, Announce Notifications, "Hey Siri, Tara" Q&A). Quick essentials:
+## Make her yours
 
+`config.json` sets your name, her name, and voice; `phrases.json` is her entire
+personality — every line she can say, ~20 variants per situation, with
+`{name}`/`{title}`/`{time}` placeholders. Rewrite it in your own language of
+affection (or actual language — any edge-tts voice works). See `CLAUDE.md` for
+the design rationale and extension guide.
 
-1. **Apple Watch** — Watch app → Sounds & Haptics → **Prominent Haptics** on; add a 2nd alert per important event.
-2. **CarPlay voice** — Settings → Notifications → **Announce Notifications** → on + CarPlay; enable **Calendar**.
-3. **Siri agenda** — Settings → Calendar → Accounts → add Google. Then "Hey Siri, what's my schedule today?" works in the car (English).
+MIT licensed.

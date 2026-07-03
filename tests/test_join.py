@@ -1,4 +1,4 @@
-"""Tests for join detection — the logic that decides whether Sujit has actually
+"""Tests for join detection — the logic that decides whether the user has actually
 joined THIS meeting (so we can stand down) vs. some background app merely holding
 the mic open (which must NOT stand down — that was the silent-failure bug)."""
 

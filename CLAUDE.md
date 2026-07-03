@@ -45,11 +45,13 @@ is awake; that's the known gap the phone layers fill.
 | `phrases.json` | Persona lines, ~20 per situation, picked at random. |
 | `config.json` | All settings. Brain re-reads it every tick. |
 | `preview-theme.sh` | `./preview-theme.sh sunrise 8` or `all`. |
-| LaunchAgents | `~/Library/LaunchAgents/com.sujitk.meeting-assistant.{brain,menubar}.plist` |
+| LaunchAgents | `~/Library/LaunchAgents/com.tara-assistant.{brain,menubar}.plist` |
 
 ## Sujit's preferences — TONE, PERSONA, LANGUAGE (important)
 
-These are settled decisions. Honour them when editing phrases or behaviour.
+These are settled decisions by the original author (Sujit) and ship as the
+project's defaults. Honour them when editing phrases or behaviour. (Other users
+customise via `config.json` — name, assistant_name, voice — and `phrases.json`.)
 
 **Persona — "Tara":**
 - Female assistant named **Tara**; the user is **Sujit**.
@@ -96,7 +98,7 @@ latest, min_minutes}, `rsvp` {accepted/needs_action/tentative/declined → full|
 - **New phrase category:** add an array to `phrases.json` (aim for ~20), call `pick("category", cfg, **kw)`. Placeholders: `{name} {assistant} {title} {mins} {time} {n} {meetings}`. Add to `always_name` in `brain.py` if it must always include his name.
 - **New theme:** add to `THEMES` in `overlay.swift` (top/bottom/accent/glow — this is the *calm* sky only; the late palette is universal, don't add per-theme late variants), recompile, then add to `THEMES` in `menubar.py` and the `all` loop in `preview-theme.sh`.
 - **New output channel** (e.g. phone push): channels are just functions called from the tick — add alongside `speak()` / `launch_overlay()` / `show_toast()`.
-- After editing `brain.py`/`phrases.json`: no restart needed (each tick is a fresh process). After editing `menubar.py` or `overlay.swift`: `launchctl kickstart -k gui/$(id -u)/com.sujitk.meeting-assistant.menubar` and/or recompile.
+- After editing `brain.py`/`phrases.json`: no restart needed (each tick is a fresh process). After editing `menubar.py` or `overlay.swift`: `launchctl kickstart -k gui/$(id -u)/com.tara-assistant.menubar` and/or recompile.
 
 ## Run / control / debug
 
@@ -106,7 +108,7 @@ $VENV ~/.meeting-assistant/brain.py --tick       # run one tick by hand
 $VENV ~/.meeting-assistant/brain.py --briefing    # hear the morning briefing now
 $VENV ~/.meeting-assistant/brain.py --status      # health
 tail -f ~/.meeting-assistant/logs/assistant.log
-launchctl bootout gui/$(id -u)/com.sujitk.meeting-assistant.brain    # pause
+launchctl bootout gui/$(id -u)/com.tara-assistant.brain    # pause
 ~/.meeting-assistant/uninstall.sh                 # remove agents (keeps files)
 ```
 

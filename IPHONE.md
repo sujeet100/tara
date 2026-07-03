@@ -35,7 +35,7 @@ from a Mac, so treat it as a head start, not a guarantee.
 Shortcuts app → **+** → name it **`Today's Agenda`** → add:
 
 1. **Find Calendar Events** — Start Date `is Today`, Sort by `Start Date`, `Ascending`.
-2. **Speak Text** — type only: `Good morning Sujit. Here is your day.` → expand options → **Wait Until Finished: On**, Language **English (India)**.
+2. **Speak Text** — type only: `Good morning. Here is your day.` → expand options → **Wait Until Finished: On**, Language **English (India)**.
 3. **Speak Text** — insert **only** the `Calendar Events` variable and **don't tap the chip** (leaving it whole makes it read each event *with its time*). → **Wait Until Finished: On**.
 
 > Two separate Speak Text actions = you never mix text + a variable in one field

@@ -12,6 +12,7 @@ state.json
 runtime/
 logs/
 stopped
+ONBOARDING.md
 
 # ── IDE ────────────────────────────────────────────────
 .idea/

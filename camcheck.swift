@@ -1,6 +1,6 @@
 // camcheck — prints "1" if any video INPUT device (camera) is currently capturing
-// (i.e. some app has the camera live), else "0". Companion to miccheck: when Sujit
-// turns his video on, that's a strong "I've really joined" signal. Reads
+// (i.e. some app has the camera live), else "0". Companion to miccheck: when
+// video is turned on, that's a strong "I've really joined" signal. Reads
 // kCMIODevicePropertyDeviceIsRunningSomewhere — device state only, captures no
 // video, so it needs no camera permission.
 

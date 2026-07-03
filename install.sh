@@ -27,8 +27,15 @@ fi
 # 4. launch agents (generated with this machine's paths)
 U=$(id -u); PY="$APP/venv/bin/python"; LA="$HOME/Library/LaunchAgents"
 mkdir -p "$LA"
+
+# migrate installs that used the old personal label
+for old in com.sujitk.meeting-assistant.brain com.sujitk.meeting-assistant.menubar; do
+  launchctl bootout "gui/$U/$old" 2>/dev/null || true
+  rm -f "$LA/$old.plist"
+done
+
 make_agent() {  # $1=label suffix  $2=extra plist keys
-  local label="com.sujitk.meeting-assistant.$1"
+  local label="com.tara-assistant.$1"
   cat > "$LA/$label.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,4 +54,7 @@ PLIST
 make_agent brain   "<key>StartInterval</key><integer>60</integer><key>RunAtLoad</key><true/>" "brain.py" "<string>--tick</string>"
 make_agent menubar "<key>KeepAlive</key><true/><key>RunAtLoad</key><true/>" "menubar.py" ""
 
-echo "Done. Set your calendar URL in $APP/.env, then it runs every minute."
+echo "Done — agents installed; the brain ticks every minute."
+if grep -q "XXXXXXXX" "$APP/.env" 2>/dev/null; then
+  echo "→ Finish setup (name + calendar link, validated): $PY $APP/brain.py --setup"
+fi

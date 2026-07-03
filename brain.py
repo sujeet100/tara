@@ -44,7 +44,7 @@ LOCK_FILE = BASE / "runtime" / "tick.lock"
 STOP_FILE = BASE / "stopped"   # presence = hard off switch; brain no-ops while it exists
 
 DEFAULT_CONFIG = {
-    "timezone": "Asia/Kolkata",
+    "timezone": "",                   # empty = auto-detect from the system
     "name": "there",                  # your name (set in config.json)
     "assistant_name": "Tara",         # what she calls herself
     "name_frequency": 0.4,            # how often she uses your name (0..1)
@@ -106,6 +106,17 @@ def setup_logging() -> None:
     log.setLevel(logging.INFO)
 
 
+def system_timezone() -> str:
+    """IANA name of the Mac's current timezone (e.g. 'Asia/Kolkata')."""
+    try:
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            return link.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return "UTC"
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
@@ -113,6 +124,7 @@ def load_config() -> dict:
             cfg.update(json.loads(CONFIG_FILE.read_text()))
         except Exception as exc:  # noqa: BLE001
             log.warning("bad config.json, using defaults: %s", exc)
+    cfg["timezone"] = cfg.get("timezone") or system_timezone()
     return cfg
 
 
@@ -199,10 +211,11 @@ TOAST_BIN = BIN / "toast"
 
 
 def show_toast(title: str, message: str, cfg: dict, url: str = "") -> None:
-    """Corner popup (top-right, self-dismissing) — the GARNISH channel. Sujit
-    tunes out corner notifications (Rize's popups are in the app's origin story),
-    so this only ever accompanies voice for the gentle moments; anything that
-    must land goes through voice + the full-screen overlay, never just this."""
+    """Corner popup (top-right, self-dismissing) — the GARNISH channel. Corner
+    notifications are exactly the kind that get tuned out (that failure mode is
+    this app's origin story), so this only ever accompanies voice for the gentle
+    moments; anything that must land goes through voice + the full-screen
+    overlay, never just this."""
     tc = cfg.get("toast", {})
     if not tc.get("enabled", True) or not TOAST_BIN.exists():
         return
@@ -288,9 +301,9 @@ def mic_in_use() -> bool:
 
 
 def cam_in_use() -> bool:
-    """Camera-active signal (CoreMediaIO). A strong 'really here' cue when Sujit
-    turns video on — but he doesn't always, so it only ever strengthens, never
-    gates, join detection."""
+    """Camera-active signal (CoreMediaIO). A strong 'really here' cue when video
+    is on — but it isn't always, so it only ever strengthens, never gates, join
+    detection."""
     camcheck = BIN / "camcheck"
     if camcheck.exists():
         try:
@@ -312,15 +325,15 @@ def zoom_in_meeting() -> bool:
 
 def joined_for(ev_start, now, *, mic_active, mic_on_since, zoom_live, max_lead,
                cam_active=False, cam_on_since=None):
-    """True only if Sujit has actually joined THIS meeting.
+    """True only if the user has actually joined THIS meeting.
 
     Zoom's in-call helper (CptHost) is a hard yes. Mic and camera are weaker
     signals: each counts only if the device went live *recently* — within
     ~max_lead+2 min of the start. A device held open for hours by a background app
     (a Slack huddle, OBS, a VM, a stray Meet tab) is NOT a join; trusting it
     silently stood every meeting down, the exact silent-failure mode this app
-    exists to kill. Camera is a strong "really here" cue when he turns video on,
-    but he doesn't always — so it's an OR with the mic, never required. `now` is
+    exists to kill. Camera is a strong "really here" cue when video is on, but
+    it isn't always — so it's an OR with the mic, never required. `now` is
     accepted for symmetry/future use though the test is start-relative.
     """
     if zoom_live:
@@ -678,10 +691,10 @@ def maybe_wrapup(events: list[dict], state: dict, cfg: dict, now: datetime,
     """Voice-only courtesy near the end of the CURRENT meeting: 'about 5 minutes
     left, and <next> is at <time>'. The mirror image of the join nag — it keeps
     back-to-back days from cascading. Deliberately narrow so it never becomes
-    noise: fires once per meeting, only for a meeting he's actually in (acked it,
-    or a mic/camera/Zoom call is live right now), and only when ANOTHER meeting
-    starts within next_within_min of this one ending — if nothing follows,
-    overrunning is his call and Tara stays quiet."""
+    noise: fires once per meeting, only for a meeting the user is actually in
+    (acked, or a mic/camera/Zoom call is live right now), and only when ANOTHER
+    meeting starts within next_within_min of this one ending — if nothing
+    follows, overrunning is their call and the assistant stays quiet."""
     wc = cfg.get("wrap_up", {})
     if not wc.get("enabled", True):
         return
@@ -801,8 +814,8 @@ def tick() -> None:
         snooze_until = state["snooze"].get(key)
         snoozed = snooze_until and now < datetime.fromisoformat(snooze_until)
 
-        # Has Sujit actually joined THIS meeting? (recency-aware — a device held
-        # open for hours doesn't count; see joined_for.)
+        # Has the user actually joined THIS meeting? (recency-aware — a device
+        # held open for hours doesn't count; see joined_for.)
         joined = joined_for(ev["start"], now, mic_active=mic_active,
                             mic_on_since=mic_on_since, cam_active=cam_active,
                             cam_on_since=cam_on_since, zoom_live=zoom_live,
@@ -888,10 +901,67 @@ def tick() -> None:
     save_state(state)
 
 
+def setup_wizard() -> None:
+    """Interactive first-run setup: name, email, calendar URL — validated with
+    an immediate fetch so a typo fails HERE, not silently later. Safe to re-run;
+    Enter keeps the current value."""
+    print("Tara — setup. Press Enter to keep [current] values.\n")
+    raw = {}
+    if CONFIG_FILE.exists():
+        try:
+            raw = json.loads(CONFIG_FILE.read_text())
+        except Exception:  # noqa: BLE001
+            pass
+    name = input(f"Your name [{raw.get('name', '')}]: ").strip() or raw.get("name", "")
+    email = (input(f"Calendar email, used to read your RSVPs [{raw.get('my_email', '')}]: ").strip()
+             or raw.get("my_email", ""))
+    current_url = read_calendar_url() or ""
+    print("\nCalendar feed URL. Google Calendar: Settings → your calendar →")
+    print("'Integrate calendar' → 'Secret address in iCal format'. Any .ics feed URL works.")
+    url = input(f"URL{' [keep current]' if current_url else ''}: ").strip() or current_url
+    if not url:
+        print("\nNo URL given — there's no calendar to watch. Re-run --setup anytime.")
+        return
+    print("Checking the feed…", end=" ", flush=True)
+    try:
+        resp = requests.get(url, timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        print(f"failed ({type(exc).__name__}). Check the URL and re-run --setup.")
+        return
+    if resp.status_code != 200 or b"BEGIN:VCALENDAR" not in resp.content[:2000]:
+        print(f"that doesn't look like an iCal feed (HTTP {resp.status_code}).")
+        return
+    print(f"looks good ({len(resp.content) // 1024} KB).")
+
+    ENV_FILE.write_text(f"CALENDAR_ICAL_URL={url}\n")
+    os.chmod(ENV_FILE, 0o600)
+    if name:
+        raw["name"] = name
+    if email:
+        raw["my_email"] = email
+    CONFIG_FILE.write_text(json.dumps(raw, indent=2))
+
+    # cache + index right now, so the very first tick already knows the day
+    cfg = load_config()
+    tz = ZoneInfo(cfg["timezone"])
+    CACHE.mkdir(parents=True, exist_ok=True)
+    (CACHE / "last.ics").write_bytes(resp.content)
+    build_event_index(cfg, tz)
+    events = load_events(cfg, tz, feed_changed=False)
+    today = [e for e in events if e["start"].date() == datetime.now(tz).date()]
+    print(f"\nFound {len(today)} timed meeting(s) today (timezone: {cfg['timezone']}).")
+    print("Done — the brain ticks every minute. Say hello:")
+    speak(f"Hello {name or 'there'}! I'm {cfg.get('assistant_name', 'Tara')}, "
+          "and I'm watching your calendar from now on.", cfg)
+
+
 def main() -> None:
     setup_logging()
     BASE.mkdir(parents=True, exist_ok=True)
     arg = sys.argv[1] if len(sys.argv) > 1 else "--tick"
+    if arg == "--setup":
+        setup_wizard()
+        return
     if arg == "--briefing":
         cfg = load_config(); tz = ZoneInfo(cfg["timezone"])
         speak_briefing(load_events(cfg, tz, feed_changed=False), cfg, tz)

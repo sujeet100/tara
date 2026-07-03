@@ -29,7 +29,7 @@ VENV_PY = BASE / "venv" / "bin" / "python"
 BRAIN = BASE / "brain.py"
 PREVIEW = BASE / "preview-theme.sh"
 
-BRAIN_LABEL = "com.sujitk.meeting-assistant.brain"
+BRAIN_LABEL = "com.tara-assistant.brain"
 BRAIN_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{BRAIN_LABEL}.plist"
 
 THEMES = ["midnight", "sunrise", "forest", "grape", "mono", "glass"]
@@ -52,6 +52,17 @@ def hide_dock_icon() -> None:
             NSApplicationActivationPolicyAccessory)
     except Exception:  # noqa: BLE001 — worst case we keep the old Dock icon
         pass
+
+
+def system_timezone() -> str:
+    """IANA name of the Mac's current timezone (mirrors brain.py — decoupled)."""
+    try:
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            return link.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return "UTC"
 
 
 def load_cfg() -> dict:
@@ -206,17 +217,17 @@ class MeetingAssistant(rumps.App):
     def set_calendar(self, _):
         current = self._read_env("CALENDAR_ICAL_URL")
         resp = rumps.Window(
-            message="Paste your Google Calendar 'Secret address in iCal format' "
-                    "(must contain 'private-' and end in .ics):",
+            message="Paste your calendar's iCal feed URL — Google Calendar's "
+                    "'Secret address in iCal format', or any https .ics link:",
             title="Calendar link", default_text=current,
             ok="Save", cancel="Cancel", dimensions=(440, 60)).run()
         if not resp.clicked:
             return
         url = resp.text.strip()
-        if not (url.startswith("https://calendar.google.com/calendar/ical/") and url.endswith(".ics")):
-            rumps.alert("That doesn't look like a Google iCal URL.\n\n"
-                        "It should start with https://calendar.google.com/calendar/ical/ "
-                        "and end in .ics")
+        if not url.startswith("https://"):
+            rumps.alert("That doesn't look like a feed URL — it should start "
+                        "with https:// (Google Calendar → Settings → Integrate "
+                        "calendar → 'Secret address in iCal format').")
             return
         ENV_FILE.write_text(f"CALENDAR_ICAL_URL={url}\n")
         os.chmod(ENV_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 600
@@ -301,7 +312,7 @@ class MeetingAssistant(rumps.App):
             return
 
         cfg = load_cfg()
-        tz = ZoneInfo(cfg.get("timezone", "Asia/Kolkata"))
+        tz = ZoneInfo(cfg.get("timezone") or system_timezone())
         now = datetime.now(tz)
         try:
             state = json.loads(STATE.read_text())
