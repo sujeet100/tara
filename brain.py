@@ -81,6 +81,11 @@ DEFAULT_CONFIG = {
         "latest": "14:00",            # must have eaten by here
         "min_minutes": 20,            # smallest gap worth calling "lunch"
     },
+    "wrap_up": {
+        "enabled": True,
+        "lead_min": 5,                # warn this long before the current meeting ends
+        "next_within_min": 15,        # ...but only if the next one starts this soon after
+    },
 }
 
 log = logging.getLogger("brain")
@@ -638,6 +643,45 @@ def _today_at(now: datetime, hhmm: str) -> datetime:
     return now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
 
 
+def maybe_wrapup(events: list[dict], state: dict, cfg: dict, now: datetime,
+                 in_call: bool) -> None:
+    """Voice-only courtesy near the end of the CURRENT meeting: 'about 5 minutes
+    left, and <next> is at <time>'. The mirror image of the join nag — it keeps
+    back-to-back days from cascading. Deliberately narrow so it never becomes
+    noise: fires once per meeting, only for a meeting he's actually in (acked it,
+    or a mic/camera/Zoom call is live right now), and only when ANOTHER meeting
+    starts within next_within_min of this one ending — if nothing follows,
+    overrunning is his call and Tara stays quiet."""
+    wc = cfg.get("wrap_up", {})
+    if not wc.get("enabled", True):
+        return
+    lead = wc.get("lead_min", 5)
+    next_win = wc.get("next_within_min", 15)
+    wrapped = state.setdefault("wrapup", {})
+    for ev in events:
+        if not (ev["start"] <= now < ev["end"]):
+            continue  # not in this meeting right now
+        if ev["key"] in wrapped or alert_level(ev, cfg) == "skip":
+            continue
+        mins_left = (ev["end"] - now).total_seconds() / 60
+        if mins_left > lead + 0.5:
+            continue
+        if not (ev["key"] in state.get("acked", {}) or in_call):
+            continue  # he never joined this one; a wrap-up would be noise
+        nxt = min((e for e in events
+                   if e["key"] != ev["key"] and e["start"] > now
+                   and e["start"] <= ev["end"] + timedelta(minutes=next_win)
+                   and alert_level(e, cfg) != "skip"),
+                  key=lambda e: e["start"], default=None)
+        if nxt is None:
+            continue
+        wrapped[ev["key"]] = now.isoformat()
+        mins_phrase = "a minute" if mins_left < 1.5 else f"{int(round(mins_left))} minutes"
+        speak(pick("wrap_up", cfg, mins=mins_phrase,
+                   title=nxt["title"], time=fmt_time(nxt["start"])), cfg)
+        log.info("wrap-up warning for %r (next: %r)", ev["title"], nxt["title"])
+
+
 # --------------------------------------------------------------------------- #
 # the tick
 # --------------------------------------------------------------------------- #
@@ -661,6 +705,7 @@ def tick() -> None:
     state.setdefault("acked", {})
     state.setdefault("snooze", {})
     state.setdefault("opened", {})
+    state.setdefault("wrapup", {})
 
     fetch_feed(state, cfg, tz)
     fail_loud_check(state, cfg, tz)
@@ -693,6 +738,9 @@ def tick() -> None:
     cam_on_since = (datetime.fromisoformat(dev["cam"]["on_since"])
                     if dev.get("cam", {}).get("on_since") else None)
     zoom_live = zoom_in_meeting()
+
+    maybe_wrapup(events, state, cfg, now,
+                 in_call=mic_active or cam_active or zoom_live)
 
     live_keys = set()
     for ev in events:
@@ -794,7 +842,7 @@ def tick() -> None:
                 fired["nag"] = now.isoformat()
 
     # prune state for events no longer in window
-    for bucket in ("fired", "overlay", "acked", "snooze", "opened"):
+    for bucket in ("fired", "overlay", "acked", "snooze", "opened", "wrapup"):
         for k in list(state[bucket]):
             if k not in live_keys and k != "calendar-error":
                 # keep recently-acked briefly to avoid re-alerting; drop the rest

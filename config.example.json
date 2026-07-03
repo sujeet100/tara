@@ -30,6 +30,11 @@
     "latest": "14:00",
     "min_minutes": 20
   },
+  "wrap_up": {
+    "enabled": true,
+    "lead_min": 5,
+    "next_within_min": 15
+  },
   "rsvp": {
     "accepted": "full",
     "needs_action": "remind",

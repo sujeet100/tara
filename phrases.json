@@ -439,5 +439,27 @@
     "{name}, whatever you're doing can wait. This cannot.",
     "{name}... don't make me use my upset voice again.",
     "{name}, now. Please. For both of us."
+  ],
+  "wrap_up": [
+    "About {mins} left here — {title} is up next at {time}. Start landing the plane.",
+    "Gentle heads up: {mins} to wrap this one. {title} follows at {time}.",
+    "{mins} left, then {title} at {time}. Save yourself a breath in between.",
+    "Time to find your closing line — {title} starts at {time}.",
+    "Wrap-up warning: {mins} remaining, and {title} is waiting at {time}.",
+    "When this one ends, {title} begins at {time}. Start wrapping, {name}.",
+    "{mins} on the clock here. Next stop: {title} at {time}.",
+    "Begin your goodbyes — {title} is at {time}.",
+    "This one's almost done, and {title} comes right after at {time}.",
+    "Don't let this meeting eat the next one — {title} at {time}.",
+    "{name}, about {mins} left. Park the open points and glide out.",
+    "Closing time soon. {title} needs you at {time}.",
+    "About {mins} to go — leave on time, {title} follows at {time}.",
+    "The next one is close: {title} at {time}. Start summarising.",
+    "If there are action items, capture them now — {title} is at {time}.",
+    "{mins} left, and it's a back-to-back day — no lingering, okay?",
+    "Two words: wrap up. {title} is at {time}.",
+    "You have {mins} to land this gracefully before {title} at {time}.",
+    "Almost there — finish strong, then {title} at {time}.",
+    "Give this one a good ending; {title} opens at {time}."
   ]
 }

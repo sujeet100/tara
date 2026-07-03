@@ -73,6 +73,8 @@ These are settled decisions. Honour them when editing phrases or behaviour.
 4. a nudge about **invites he hasn't responded to**, then
 5. a **closing sign-off** ("Thank you… have a good day") so he knows she's finished.
 
+**Wrap-up warning** (July 2026): voice-only nudge ~5 min before the *current* meeting ends — "about 5 minutes left, {next} is at {time}" — the mirror image of the join nag, for back-to-back days. Deliberately narrow so it never becomes noise: once per meeting, only if he's actually in it (acked, or mic/cam/Zoom live), and only when another meeting starts within `wrap_up.next_within_min` of this one ending; if nothing follows, overrunning is his call and Tara stays quiet. Config `wrap_up` {enabled, lead_min, next_within_min}; phrases in `wrap_up`; tests in `tests/test_wrapup.py`.
+
 **Lunch:** he forgets lunch when meetings sneak up. Nudge him at the **last good gap before an afternoon meeting** ("free until your 2 PM — go eat now"). Window `12:30–14:00`, min gap 20 min. If back-to-back through lunch, one caring "don't skip lunch" warning.
 
 **RSVP-aware** (he asked for this): read his `PARTSTAT` per event — **declined → skip entirely**, **not-responded / tentative → remind only** (lead + overlay, no auto-open, no escalating nag), **accepted → full**.
