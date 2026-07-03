@@ -40,6 +40,20 @@ VOICES = [
 ]
 
 
+def hide_dock_icon() -> None:
+    """Register as an accessory (menu-bar-only) app. A plain Python script that
+    loads AppKit checks in as a full Foreground app, so the Python rocket squats
+    in the Dock forever — and force-quitting is futile because launchd KeepAlive
+    resurrects it. Accessory policy keeps the 🌸 menu item and its dialogs but
+    removes the Dock presence."""
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyAccessory)
+    except Exception:  # noqa: BLE001 — worst case we keep the old Dock icon
+        pass
+
+
 def load_cfg() -> dict:
     try:
         return json.loads(CONFIG.read_text())
@@ -326,4 +340,5 @@ class MeetingAssistant(rumps.App):
 
 
 if __name__ == "__main__":
+    hide_dock_icon()
     MeetingAssistant().run()
