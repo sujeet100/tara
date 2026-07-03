@@ -11,6 +11,10 @@ events.json
 state.json
 runtime/
 logs/
+stopped
+
+# ── IDE ────────────────────────────────────────────────
+.idea/
 
 # ── build artifacts / environment ──────────────────────
 venv/

@@ -41,6 +41,7 @@ ENV_FILE = BASE / ".env"
 STATE_FILE = BASE / "state.json"
 CONFIG_FILE = BASE / "config.json"
 LOCK_FILE = BASE / "runtime" / "tick.lock"
+STOP_FILE = BASE / "stopped"   # presence = hard off switch; brain no-ops while it exists
 
 DEFAULT_CONFIG = {
     "timezone": "Asia/Kolkata",
@@ -650,6 +651,17 @@ def _today_at(now: datetime, hhmm: str) -> datetime:
 # the tick
 # --------------------------------------------------------------------------- #
 def tick() -> None:
+    # Hard off switch. While this marker exists Tara does nothing — no voice, no
+    # overlay, no nag — and any overlay still on screen is dismissed. Survives
+    # reboots (it's a file), so even if launchd relaunches us we stay quiet until
+    # the user resumes (menu bar "Resume Tara", or `rm ~/.meeting-assistant/stopped`).
+    if STOP_FILE.exists():
+        state = load_state()
+        for rec in state.get("overlay", {}).values():
+            kill_overlay(rec.get("pid"))
+        log.info("stopped (off switch present); standing down")
+        return
+
     cfg = load_config()
     tz = ZoneInfo(cfg["timezone"])
     state = load_state()

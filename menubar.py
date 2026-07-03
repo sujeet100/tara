@@ -9,6 +9,7 @@ every tick, so changes here take effect within a minute.
 
 import json
 import os
+import signal
 import stat
 import subprocess
 from datetime import datetime
@@ -23,9 +24,13 @@ URLFILE = BASE / "calendar-url.txt"   # legacy
 ENV_FILE = BASE / ".env"
 STATE = BASE / "state.json"
 INDEX = BASE / "events.json"
+STOP_FILE = BASE / "stopped"          # presence = brain off switch (honoured by brain.py)
 VENV_PY = BASE / "venv" / "bin" / "python"
 BRAIN = BASE / "brain.py"
 PREVIEW = BASE / "preview-theme.sh"
+
+BRAIN_LABEL = "com.sujitk.meeting-assistant.brain"
+BRAIN_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{BRAIN_LABEL}.plist"
 
 THEMES = ["midnight", "sunrise", "forest", "grape", "mono", "glass"]
 VOICES = [
@@ -46,6 +51,36 @@ def save_cfg(cfg: dict) -> None:
     CONFIG.write_text(json.dumps(cfg, indent=2))
 
 
+def is_stopped() -> bool:
+    return STOP_FILE.exists()
+
+
+def kill_live_overlays() -> None:
+    """Dismiss any overlay still on screen (the brain tracks pids in state.json)."""
+    try:
+        state = json.loads(STATE.read_text())
+    except Exception:
+        return
+    for rec in state.get("overlay", {}).values():
+        pid = rec.get("pid")
+        if not pid:
+            continue
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+
+
+def _launchctl(*args) -> None:
+    """Best-effort launchctl call — the stop file is the real guarantee, so we
+    don't care if this fails (e.g. agent already booted out)."""
+    try:
+        subprocess.run(["/bin/launchctl", *args], check=False,
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
 class MeetingAssistant(rumps.App):
     def __init__(self):
         super().__init__("🌸", quit_button=None)
@@ -59,6 +94,13 @@ class MeetingAssistant(rumps.App):
         cfg = load_cfg()
         self.menu.clear()
         items = [self.status_item, self.health_item, rumps.separator]
+
+        if is_stopped():
+            items.append(rumps.MenuItem("▶︎ Resume Tara", callback=self.resume_tara))
+        else:
+            items.append(rumps.MenuItem("⏹ Stop Tara (no more alerts)",
+                                        callback=self.stop_tara))
+        items.append(rumps.separator)
 
         theme_menu = rumps.MenuItem("Theme")
         cur_theme = cfg.get("overlay_theme", "midnight")
@@ -100,7 +142,8 @@ class MeetingAssistant(rumps.App):
             rumps.MenuItem("Test alert", callback=self.test_alert),
             rumps.separator,
             rumps.MenuItem("Open config folder", callback=self.open_folder),
-            rumps.MenuItem("Quit", callback=rumps.quit_application),
+            rumps.MenuItem("Hide menu-bar icon (alerts keep running)",
+                           callback=self.quit_icon),
         ]
         for it in items:
             self.menu.add(it)
@@ -200,8 +243,43 @@ class MeetingAssistant(rumps.App):
     def open_folder(self, _):
         subprocess.Popen(["/usr/bin/open", str(BASE)])
 
+    # ---- stop / resume -----------------------------------------------------
+    def stop_tara(self, _):
+        """Hard off switch: silence everything and keep it off until resumed.
+
+        Three layers, most→least durable: (1) the `stopped` marker file the brain
+        checks at the top of every tick (survives reboots, so even a launchd
+        relaunch stays quiet); (2) boot the brain agent out so it stops spawning
+        right now; (3) kill any overlay currently on screen."""
+        STOP_FILE.write_text("stopped via menu bar\n")
+        uid = os.getuid()
+        _launchctl("bootout", f"gui/{uid}/{BRAIN_LABEL}")
+        kill_live_overlays()
+        self.build_menu()
+        rumps.notification("Tara stopped", "",
+                           "No more voice or overlays. Resume from the 🌸 menu.")
+
+    def resume_tara(self, _):
+        STOP_FILE.unlink(missing_ok=True)
+        uid = os.getuid()
+        if BRAIN_PLIST.exists():
+            _launchctl("bootstrap", f"gui/{uid}", str(BRAIN_PLIST))
+        self.build_menu()
+        rumps.notification("Tara resumed", "", "I'm watching your calendar again.")
+
+    def quit_icon(self, _):
+        """Quit ONLY the menu-bar icon. The brain keeps running — use 'Stop Tara'
+        to actually silence alerts."""
+        rumps.quit_application()
+
     # ---- health refresh ----------------------------------------------------
     def refresh(self, _):
+        if is_stopped():
+            self.title = "🌸💤"
+            self.status_item.title = "Tara is stopped"
+            self.health_item.title = "Resume from this menu to re-enable alerts"
+            return
+
         cfg = load_cfg()
         tz = ZoneInfo(cfg.get("timezone", "Asia/Kolkata"))
         now = datetime.now(tz)
