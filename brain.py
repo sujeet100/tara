@@ -73,7 +73,7 @@ DEFAULT_CONFIG = {
     "stale_realert_every_min": 30,
     "work_hours": {"start": "08:00", "end": "21:00"},
     "briefing_time": "07:30",         # morning agenda read-out
-    "snooze_min": 1,
+    "snooze_min": 2,
     "overlay_theme": "midnight",      # midnight | sunrise | forest | grape | mono
     "lunch": {
         "enabled": True,
@@ -174,7 +174,8 @@ def pick(category: str, cfg: dict, **kw) -> str:
     template = random.choice(options)
     # When she's annoyed, ALWAYS use the name. Otherwise use it only "every now and
     # then" — if a name line was picked but we're over budget, prefer a no-name one.
-    always_name = category in ("overdue_firm", "overdue_upset", "briefing_greeting")
+    always_name = category in ("overdue_firm", "overdue_upset", "briefing_greeting",
+                               "overlay_line_late")
     if "{name}" in template and not always_name and random.random() > cfg.get("name_frequency", 0.4):
         alts = [o for o in options if "{name}" not in o]
         if alts:
@@ -197,7 +198,9 @@ def open_url(url: str) -> None:
 
 
 def launch_overlay(safe_id: str, title: str, start_iso: str, url: str,
-                   mode: str = "meeting", theme: str = "midnight") -> int | None:
+                   mode: str = "meeting", theme: str = "midnight",
+                   lead_min: float = 3, snooze_min: int = 2,
+                   line: str = "", late_line: str = "") -> int | None:
     overlay = BIN / "overlay"
     if not overlay.exists():
         log.warning("overlay binary missing; voice-only")
@@ -207,7 +210,9 @@ def launch_overlay(safe_id: str, title: str, start_iso: str, url: str,
             [str(overlay),
              "--id", safe_id, "--title", title, "--start", start_iso,
              "--url", url or "", "--mode", mode, "--theme", theme,
-             "--runtime", str(RUNTIME)],
+             "--runtime", str(RUNTIME),
+             "--lead", str(lead_min), "--snooze", str(snooze_min),
+             "--line", line, "--lateline", late_line],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,   # detach: survives this tick exiting
         )
@@ -747,7 +752,11 @@ def tick() -> None:
         if (not snoozed and mins_to <= cfg["overlay_lead_min"] + 0.5
                 and not had_overlay and not rec.get("dismissed")):
             pid = launch_overlay(sid, ev["title"], ev["start"].isoformat(),
-                                 ev["url"], theme=cfg.get("overlay_theme", "midnight"))
+                                 ev["url"], theme=cfg.get("overlay_theme", "midnight"),
+                                 lead_min=cfg["overlay_lead_min"],
+                                 snooze_min=cfg.get("snooze_min", 2),
+                                 line=pick("overlay_line", cfg, title=ev["title"]),
+                                 late_line=pick("overlay_line_late", cfg, title=ev["title"]))
             state["overlay"][key] = {"pid": pid, "launched": now.isoformat()}
 
         # Genuine join → stand down (dismiss overlay + stop nagging), but only once

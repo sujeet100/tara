@@ -35,7 +35,7 @@ is awake; that's the known gap the phone layers fill.
 | File | Purpose |
 |------|---------|
 | `brain.py` | Periodic tick: fetch → index → decide → alert (voice/overlay/open/nag), briefing, lunch, fail-loud. |
-| `overlay.swift` → `bin/overlay` | Full-screen themed countdown window. Recompile: `swiftc -O overlay.swift -o bin/overlay`. |
+| `overlay.swift` → `bin/overlay` | Full-screen "Daybreak" countdown window, one per screen. Themes paint the *calm* sky; at start time every theme cross-fades to a universal burning-red **late palette** with a breathing pulse (visuals escalate like her voice). Progress ring depletes over `--lead` min; `⏎`=Join `esc`=Snooze; shows the platform chip and a Tara line (`--line`, swapped for `--lateline` when overdue); `--snooze <min>` labels the snooze button. All new args optional — old callers work. Recompile: `swiftc -O overlay.swift -o bin/overlay`. |
 | `miccheck.swift` → `bin/miccheck` | Mic-active join signal. Recompile: `swiftc -O miccheck.swift -o bin/miccheck`. |
 | `camcheck.swift` → `bin/camcheck` | Camera-active join signal (CoreMediaIO). Recompile: `swiftc -O camcheck.swift -o bin/camcheck`. |
 | `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and the flock dies with its process, so the queue can't jam. |
@@ -77,7 +77,7 @@ These are settled decisions. Honour them when editing phrases or behaviour.
 
 **RSVP-aware** (he asked for this): read his `PARTSTAT` per event — **declined → skip entirely**, **not-responded / tentative → remind only** (lead + overlay, no auto-open, no escalating nag), **accepted → full**.
 
-**Overlay:** full-screen, themed, live countdown, Join / I'm-in / Snooze buttons. Current theme **sunrise**. Themes: `midnight, sunrise, forest, grape, mono, glass` (glass = frosted, translucent over the screen). Menu-bar icon is **🌸**.
+**Overlay:** full-screen "Daybreak" design (he picked direction A of three mockups, July 2026): themed sky + horizon glow while there's time, progress ring around the countdown, then at start time the sky **burns red and pulses** — the visual escalates exactly like her voice does. Join / I'm-in / Snooze buttons (snooze length = `snooze_min`), keyboard shortcuts, platform chip, and one of ~20 `overlay_line` phrases on screen (swaps to an `overlay_line_late` upset line when overdue — that category is in `always_name`). Current theme **sunrise**. Themes: `midnight, sunrise, forest, grape, mono, glass` (glass = frosted, translucent over the screen); the late palette is deliberately **universal** across themes — an alarm should be unambiguous. Menu-bar icon is **🌸**.
 
 ## config.json reference
 
@@ -91,7 +91,7 @@ latest, min_minutes}, `rsvp` {accepted/needs_action/tentative/declined → full|
 ## How to extend
 
 - **New phrase category:** add an array to `phrases.json` (aim for ~20), call `pick("category", cfg, **kw)`. Placeholders: `{name} {assistant} {title} {mins} {time} {n} {meetings}`. Add to `always_name` in `brain.py` if it must always include his name.
-- **New theme:** add to `THEMES` in `overlay.swift` (recompile), to `THEMES` in `menubar.py`, and to the `all` loop in `preview-theme.sh`.
+- **New theme:** add to `THEMES` in `overlay.swift` (top/bottom/accent/glow — this is the *calm* sky only; the late palette is universal, don't add per-theme late variants), recompile, then add to `THEMES` in `menubar.py` and the `all` loop in `preview-theme.sh`.
 - **New output channel** (e.g. phone push): channels are just functions called from the tick — add alongside `speak()` / `launch_overlay()`.
 - After editing `brain.py`/`phrases.json`: no restart needed (each tick is a fresh process). After editing `menubar.py` or `overlay.swift`: `launchctl kickstart -k gui/$(id -u)/com.sujitk.meeting-assistant.menubar` and/or recompile.
 

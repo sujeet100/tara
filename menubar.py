@@ -247,12 +247,18 @@ class MeetingAssistant(rumps.App):
 
     def test_alert(self, _):
         from datetime import timedelta, timezone
+        cfg = load_cfg()
+        name = cfg.get("name", "there")
+        # starts in 12s so you see the calm state tip into the late (burning) state
         start = (datetime.now(timezone.utc) + timedelta(seconds=12)).astimezone().isoformat()
-        theme = load_cfg().get("overlay_theme", "midnight")
         subprocess.Popen([str(BASE / "bin" / "overlay"),
                           "--id", "test", "--title", "Test Meeting", "--start", start,
                           "--url", "https://meet.google.com/abc-defg-hij",
-                          "--mode", "meeting", "--theme", theme, "--runtime", str(BASE / "runtime")])
+                          "--mode", "meeting", "--theme", cfg.get("overlay_theme", "midnight"),
+                          "--runtime", str(BASE / "runtime"),
+                          "--lead", "3", "--snooze", str(cfg.get("snooze_min", 2)),
+                          "--line", "This is only a test — but imagine my voice here.",
+                          "--lateline", f"{name}... see how the sky burns when you're late?"])
 
     def open_folder(self, _):
         subprocess.Popen(["/usr/bin/open", str(BASE)])

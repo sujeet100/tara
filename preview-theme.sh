@@ -9,6 +9,7 @@ show() {
   echo "Previewing theme: $1"
   ./bin/overlay --id "preview-$1" --title "Plato Dev Huddle" --start "$START" \
     --url "https://meet.google.com/abc-defg-hij" --mode meeting --theme "$1" \
+    --line "Finish that thought — I'll hold the door for you." \
     --runtime ./runtime &
   local pid=$!
   sleep "${2:-5}"
