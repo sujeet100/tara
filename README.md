@@ -1,5 +1,7 @@
 # Tara — a warm, nagging meeting assistant for macOS
 
+[![CI](https://github.com/sujeet100/tara/actions/workflows/ci.yml/badge.svg)](https://github.com/sujeet100/tara/actions/workflows/ci.yml)
+
 A personal assistant that makes sure you **actually join your meetings**. She
 speaks to you, takes over your screen, opens the link for you, and — if you
 still don't join — gets progressively, caringly upset about it.
