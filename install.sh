@@ -14,6 +14,7 @@ python3 -m venv "$APP/venv"
 mkdir -p "$APP/bin" "$APP/cache" "$APP/logs" "$APP/runtime"
 swiftc -O "$APP/overlay.swift"  -o "$APP/bin/overlay"
 swiftc -O "$APP/miccheck.swift" -o "$APP/bin/miccheck"
+swiftc -O "$APP/camcheck.swift" -o "$APP/bin/camcheck"
 
 # 3. config + secret
 [ -f "$APP/config.json" ] || cp "$APP/config.example.json" "$APP/config.json"
