@@ -38,6 +38,7 @@ is awake; that's the known gap the phone layers fill.
 | `overlay.swift` → `bin/overlay` | Full-screen themed countdown window. Recompile: `swiftc -O overlay.swift -o bin/overlay`. |
 | `miccheck.swift` → `bin/miccheck` | Mic-active join signal. Recompile: `swiftc -O miccheck.swift -o bin/miccheck`. |
 | `camcheck.swift` → `bin/camcheck` | Camera-active join signal (CoreMediaIO). Recompile: `swiftc -O camcheck.swift -o bin/camcheck`. |
+| `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and the flock dies with its process, so the queue can't jam. |
 | `tests/test_join.py` | Plain-assert tests for `joined_for` (run: `venv/bin/python tests/test_join.py`). |
 | `menubar.py` | 🌸 menu-bar health + Preferences. |
 | `phrases.json` | Persona lines, ~20 per situation, picked at random. |
@@ -82,7 +83,8 @@ These are settled decisions. Honour them when editing phrases or behaviour.
 
 `name`, `assistant_name`, `name_frequency` (0–1), `my_email` (for RSVP),
 `tts` {engine edge|say, edge_voice, edge_rate, say_voice, say_rate}, `lead_times_min`,
-`overlay_lead_min`, `overdue_nag_minutes`, `overlay_theme`, `lunch` {enabled, earliest,
+`overlay_lead_min` (default 3; brain adds +0.5 min slack so a 60s tick can't slip it a minute late),
+`voice_gap_sec` (silence between queued announcements), `overdue_nag_minutes`, `overlay_theme`, `lunch` {enabled, earliest,
 latest, min_minutes}, `rsvp` {accepted/needs_action/tentative/declined → full|remind|skip},
 `work_hours`, `briefing_time`, `fetch_interval_sec`, `stale_alert_after_min`.
 

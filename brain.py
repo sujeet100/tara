@@ -63,7 +63,8 @@ DEFAULT_CONFIG = {
         "say_rate": 175,
     },
     "lead_times_min": [5, 2],         # spoken pre-alerts
-    "overlay_lead_min": 1,            # full-screen overlay appears this early
+    "overlay_lead_min": 3,            # full-screen overlay appears this early
+    "voice_gap_sec": 1.5,             # silence between queued announcements
     "overdue_nag_minutes": 12,        # keep nagging this long past start, then give up
     "fetch_interval_sec": 300,        # re-download the feed at most this often
     "index_window_hours": 36,         # how far ahead to pre-expand events
@@ -136,33 +137,18 @@ def acquire_lock():
 # --------------------------------------------------------------------------- #
 # output channels
 # --------------------------------------------------------------------------- #
-EDGE_BIN = BASE / "venv" / "bin" / "edge-tts"
+VOICE_WORKER = BASE / "voice.py"
 
 
 def speak(text: str, cfg: dict) -> None:
-    """Speak in the assistant's voice, non-blocking. Primary engine is neural
-    edge-tts (human-like); if it can't synthesize (e.g. offline) it falls back to
-    macOS `say` so a reminder is NEVER lost to a network blip."""
-    import random
-    import shlex
+    """Speak in the assistant's voice, non-blocking. Each utterance is handed to
+    a detached voice.py worker; workers synthesize in parallel (edge-tts, with a
+    macOS `say` fallback so a reminder is NEVER lost to a network blip) but
+    serialize PLAYBACK through a queue with a short gap between lines — two
+    announcements landing on the same tick used to talk over each other."""
     log.info("speak: %s", text)
-    tts = cfg.get("tts", DEFAULT_CONFIG["tts"])
-    say_v = shlex.quote(tts.get("say_voice", "Tara"))
-    say_r = str(tts.get("say_rate", 175))
-    qtext = shlex.quote(text)
-
-    if tts.get("engine", "edge") == "edge" and EDGE_BIN.exists():
-        tmp = f"/tmp/ma_{os.getpid()}_{random.randint(0, 99999)}.mp3"
-        voice = shlex.quote(tts.get("edge_voice", "en-IN-NeerjaExpressiveNeural"))
-        rate = tts.get("edge_rate", "-3%")
-        synth = f"{shlex.quote(str(EDGE_BIN))} --voice {voice} --rate={rate} --text {qtext} --write-media {tmp} 2>/dev/null"
-        cmd = (f"if {synth} && [ -s {tmp} ]; then /usr/bin/afplay {tmp}; "
-               f"else /usr/bin/say -v {say_v} -r {say_r} {qtext}; fi; rm -f {tmp}")
-    else:
-        cmd = f"/usr/bin/say -v {say_v} -r {say_r} {qtext}"
-
     try:
-        subprocess.Popen(["/bin/bash", "-c", cmd],
+        subprocess.Popen([sys.executable, str(VOICE_WORKER), text],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     except Exception as exc:  # noqa: BLE001
@@ -754,9 +740,11 @@ def tick() -> None:
         # with a live countdown. It is NOT gated on the mic/camera — suppressing the
         # visual interrupt on a flaky signal was the silent-failure bug. Once we
         # deliberately dismiss it (genuine join), `dismissed` stops it relaunching.
+        # +0.5 = half a tick of slack: with 60s ticks, a bare `<= lead` check can
+        # land just after the threshold and slip a whole minute late.
         rec = state["overlay"].get(key, {})
         had_overlay = pid_alive(rec.get("pid"))
-        if (not snoozed and mins_to <= cfg["overlay_lead_min"]
+        if (not snoozed and mins_to <= cfg["overlay_lead_min"] + 0.5
                 and not had_overlay and not rec.get("dismissed")):
             pid = launch_overlay(sid, ev["title"], ev["start"].isoformat(),
                                  ev["url"], theme=cfg.get("overlay_theme", "midnight"))

@@ -12,7 +12,8 @@
     "say_rate": 175
   },
   "lead_times_min": [5, 2],
-  "overlay_lead_min": 1,
+  "overlay_lead_min": 3,
+  "voice_gap_sec": 1.5,
   "overdue_nag_minutes": 12,
   "fetch_interval_sec": 300,
   "index_window_hours": 36,
