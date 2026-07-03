@@ -35,6 +35,10 @@
     "lead_min": 5,
     "next_within_min": 15
   },
+  "toast": {
+    "enabled": true,
+    "seconds": 8
+  },
   "rsvp": {
     "accepted": "full",
     "needs_action": "remind",

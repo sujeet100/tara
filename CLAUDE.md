@@ -36,6 +36,7 @@ is awake; that's the known gap the phone layers fill.
 |------|---------|
 | `brain.py` | Periodic tick: fetch → index → decide → alert (voice/overlay/open/nag), briefing, lunch, fail-loud. |
 | `overlay.swift` → `bin/overlay` | Full-screen "Daybreak" countdown window, one per screen. Themes paint the *calm* sky; at start time every theme cross-fades to a universal burning-red **late palette** with a breathing pulse (visuals escalate like her voice). Progress ring depletes over `--lead` min; `⏎`=Join `esc`=Snooze; shows the platform chip and a Tara line (`--line`, swapped for `--lateline` when overdue); `--snooze <min>` labels the snooze button. All new args optional — old callers work. Recompile: `swiftc -O overlay.swift -o bin/overlay`. |
+| `toast.swift` → `bin/toast` | Corner popup (top-right, self-dismissing after `toast.seconds`, click opens the meeting link, never steals focus). The GARNISH channel: Sujit tunes out corner notifications (Rize's popups are in the origin story), so it only ever *accompanies* voice for gentle moments (lead alerts, wrap-up, lunch) and is skipped when the full-screen overlay is up; anything that must land goes through voice + overlay. Recompile: `swiftc -O toast.swift -o bin/toast`. |
 | `miccheck.swift` → `bin/miccheck` | Mic-active join signal. Recompile: `swiftc -O miccheck.swift -o bin/miccheck`. |
 | `camcheck.swift` → `bin/camcheck` | Camera-active join signal (CoreMediaIO). Recompile: `swiftc -O camcheck.swift -o bin/camcheck`. |
 | `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and the flock dies with its process, so the queue can't jam. |
@@ -94,7 +95,7 @@ latest, min_minutes}, `rsvp` {accepted/needs_action/tentative/declined → full|
 
 - **New phrase category:** add an array to `phrases.json` (aim for ~20), call `pick("category", cfg, **kw)`. Placeholders: `{name} {assistant} {title} {mins} {time} {n} {meetings}`. Add to `always_name` in `brain.py` if it must always include his name.
 - **New theme:** add to `THEMES` in `overlay.swift` (top/bottom/accent/glow — this is the *calm* sky only; the late palette is universal, don't add per-theme late variants), recompile, then add to `THEMES` in `menubar.py` and the `all` loop in `preview-theme.sh`.
-- **New output channel** (e.g. phone push): channels are just functions called from the tick — add alongside `speak()` / `launch_overlay()`.
+- **New output channel** (e.g. phone push): channels are just functions called from the tick — add alongside `speak()` / `launch_overlay()` / `show_toast()`.
 - After editing `brain.py`/`phrases.json`: no restart needed (each tick is a fresh process). After editing `menubar.py` or `overlay.swift`: `launchctl kickstart -k gui/$(id -u)/com.sujitk.meeting-assistant.menubar` and/or recompile.
 
 ## Run / control / debug

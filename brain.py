@@ -86,6 +86,10 @@ DEFAULT_CONFIG = {
         "lead_min": 5,                # warn this long before the current meeting ends
         "next_within_min": 15,        # ...but only if the next one starts this soon after
     },
+    "toast": {
+        "enabled": True,
+        "seconds": 8,                 # corner popup lifetime
+    },
 }
 
 log = logging.getLogger("brain")
@@ -189,6 +193,28 @@ def pick(category: str, cfg: dict, **kw) -> str:
         return template.format(**kw)
     except Exception:  # noqa: BLE001 (missing placeholder — return raw)
         return template
+
+
+TOAST_BIN = BIN / "toast"
+
+
+def show_toast(title: str, message: str, cfg: dict, url: str = "") -> None:
+    """Corner popup (top-right, self-dismissing) — the GARNISH channel. Sujit
+    tunes out corner notifications (Rize's popups are in the app's origin story),
+    so this only ever accompanies voice for the gentle moments; anything that
+    must land goes through voice + the full-screen overlay, never just this."""
+    tc = cfg.get("toast", {})
+    if not tc.get("enabled", True) or not TOAST_BIN.exists():
+        return
+    try:
+        subprocess.Popen([str(TOAST_BIN), "--title", title, "--message", message,
+                          "--duration", str(tc.get("seconds", 8)),
+                          "--theme", cfg.get("overlay_theme", "midnight"),
+                          "--url", url],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as exc:  # noqa: BLE001
+        log.error("toast failed: %s", exc)
 
 
 def open_url(url: str) -> None:
@@ -626,8 +652,12 @@ def maybe_lunch(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo) -> Non
             if next_meeting and next_meeting["start"] <= latest + timedelta(hours=1):
                 speak(pick("lunch_free", cfg, time=fmt_time(next_meeting["start"]),
                            title=next_meeting["title"]), cfg)
+                show_toast("Lunch time",
+                           f"free until {next_meeting['title']} at "
+                           f"{fmt_time(next_meeting['start'])}", cfg)
             else:
                 speak(pick("lunch_clear", cfg), cfg)
+                show_toast("Lunch time", "your afternoon is clear — go eat", cfg)
             log.info("lunch nudge fired (free window)")
             return
 
@@ -679,6 +709,8 @@ def maybe_wrapup(events: list[dict], state: dict, cfg: dict, now: datetime,
         mins_phrase = "a minute" if mins_left < 1.5 else f"{int(round(mins_left))} minutes"
         speak(pick("wrap_up", cfg, mins=mins_phrase,
                    title=nxt["title"], time=fmt_time(nxt["start"])), cfg)
+        show_toast(f"Wrap up — {mins_phrase} left",
+                   f"{nxt['title']} is next at {fmt_time(nxt['start'])}", cfg)
         log.info("wrap-up warning for %r (next: %r)", ev["title"], nxt["title"])
 
 
@@ -776,6 +808,9 @@ def tick() -> None:
                             cam_on_since=cam_on_since, zoom_live=zoom_live,
                             max_lead=max_lead)
 
+        rec = state["overlay"].get(key, {})
+        had_overlay = pid_alive(rec.get("pid"))
+
         # spoken pre-alerts (fire each lead time once)
         fired = state["fired"].setdefault(key, {})
         if not snoozed and mins_to > 0:
@@ -787,6 +822,10 @@ def tick() -> None:
                             fired[str(bigger)] = True
                     mins_phrase = f"{lt} minutes" if lt != 1 else "1 minute"
                     speak(pick("lead", cfg, title=ev["title"], mins=mins_phrase), cfg)
+                    if not had_overlay:  # pointless behind the full-screen shield
+                        show_toast(ev["title"],
+                                   f"starts in {mins_phrase} · {fmt_time(ev['start'])}",
+                                   cfg, url=ev["url"])
                     break
 
         # The full-screen overlay ALWAYS appears at overlay_lead_min and persists
@@ -795,8 +834,6 @@ def tick() -> None:
         # deliberately dismiss it (genuine join), `dismissed` stops it relaunching.
         # +0.5 = half a tick of slack: with 60s ticks, a bare `<= lead` check can
         # land just after the threshold and slip a whole minute late.
-        rec = state["overlay"].get(key, {})
-        had_overlay = pid_alive(rec.get("pid"))
         if (not snoozed and mins_to <= cfg["overlay_lead_min"] + 0.5
                 and not had_overlay and not rec.get("dismissed")):
             pid = launch_overlay(sid, ev["title"], ev["start"].isoformat(),
