@@ -38,6 +38,24 @@
     "enabled": true,
     "seconds": 8
   },
+  "in_call_voice": {
+    "enabled": true,
+    "volume": 0.35,
+    "edge_volume": "-40%",
+    "edge_rate": "-12%",
+    "edge_pitch": "-6Hz",
+    "edge_voice": "en-IN-NeerjaNeural"
+  },
+  "speaker_mirror": {
+    "enabled": true
+  },
+  "reminders": {
+    "enabled": true,
+    "lists": [],
+    "window_min": 30,
+    "follow_up_min": 30,
+    "retry_fail_min": 30
+  },
   "rsvp": {
     "accepted": "full",
     "needs_action": "remind",

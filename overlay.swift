@@ -321,9 +321,10 @@ final class OverlayController: NSObject {
         ringFill.lineCap = .round
         ringFill.strokeEnd = 1
         ringFill.frame = CGRect(x: 0, y: 0, width: size, height: size)
-        // start the stroke at 12 o'clock
-        ringFill.setAffineTransform(CGAffineTransform(translationX: size / 2, y: size / 2)
-            .rotated(by: .pi / 2).translatedBy(x: -size / 2, y: -size / 2))
+        // start the stroke at 12 o'clock — layer transforms pivot on the anchor
+        // point (the ring's centre) already, so translating to the centre and
+        // back would double-compensate and shove the ring off to the side
+        ringFill.setAffineTransform(CGAffineTransform(rotationAngle: .pi / 2))
         box.layer?.addSublayer(ringFill)
 
         digits.font = NSFont.monospacedDigitSystemFont(ofSize: 52, weight: .bold)

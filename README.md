@@ -49,8 +49,8 @@ Google Calendar feed URL: Settings → *your calendar* → **Integrate calendar*
 ## What she does
 
 - **Morning briefing** (default 07:30): greeting, today's agenda with **one-off
-  meetings called out first** (the ones you forget), then a nudge about invites
-  you haven't answered.
+  meetings called out first** (the ones you forget), a nudge about invites
+  you haven't answered, then today's tasks from Apple Reminders.
 - **Voice pre-alerts** at 5 and 2 minutes before each meeting, plus a small
   self-dismissing **corner toast** (click it to join).
 - **Full-screen "Daybreak" overlay** 3 minutes before: themed sky, live
@@ -70,6 +70,17 @@ Google Calendar feed URL: Settings → *your calendar* → **Integrate calendar*
   warning if you're booked straight through.
 - **RSVP-aware:** declined meetings are skipped entirely; tentative /
   not-responded get a lighter touch (no auto-open, no nagging).
+- **Soft voice while you're on a call:** when a call is live, alerts about
+  *other* meetings switch to short, gentle, quieter lines (lower pitch, slower)
+  — she leans in instead of talking over the people you're speaking to. The
+  full-screen overlay still escalates visually.
+- **Task reminders from Apple Reminders:** timed tasks are announced as they
+  come due (one follow-up if you don't complete them); recurring reminders
+  cover things like a weekly timesheet. Add tasks with Siri from your phone or
+  watch — completing the task is the ack. Needs one-time Reminders access.
+- **Speaker mirroring:** if your Bluetooth headphones hold the audio output but
+  no call is live (maybe they're on the desk, not on your head), announcements
+  also play through the built-in speakers — never into the void.
 - **Fail-loud:** calendar unreadable for >60 min during work hours → she says so
   and shows a red overlay, repeating every 30 min until fixed.
 
@@ -90,11 +101,13 @@ icon, never the alarms.
 
 | File | Purpose |
 |------|---------|
-| `brain.py` | The periodic tick: fetch → decide → alert. Also `--setup`, `--briefing`, `--status`. |
-| `voice.py` | Per-utterance voice worker (edge-tts, `say` fallback, queued playback). |
+| `brain.py` | The periodic tick: fetch → decide → alert. Also `--setup`, `--briefing`, `--status`, `--tasks`. |
+| `voice.py` | Per-utterance voice worker (edge-tts, `say` fallback, queued playback, emoji-free, soft in-call register, speaker mirroring). |
 | `overlay.swift` → `bin/overlay` | Full-screen Daybreak alert (countdown ring, escalating sky). |
 | `toast.swift` → `bin/toast` | Corner popup, self-dismissing, click-to-join. |
 | `miccheck.swift` / `camcheck.swift` | Mic/camera-active join signals (device state only, no capture). |
+| `remindercheck.swift` | Incomplete Apple Reminders as JSON (one-time Reminders permission). |
+| `audioroute.swift` | Output-device info + play-to-device (for speaker mirroring). |
 | `menubar.py` | 🌸 health + Preferences + Stop/Resume. |
 | `phrases.json` | The persona: ~20 lines per situation. Edit freely — this is where Tara lives. |
 | `config.json` | All settings; the brain re-reads it every tick. |

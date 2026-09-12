@@ -39,8 +39,10 @@ is awake; that's the known gap the phone layers fill.
 | `toast.swift` → `bin/toast` | Corner popup (top-right, self-dismissing after `toast.seconds`, click opens the meeting link, never steals focus). The GARNISH channel: Sujit tunes out corner notifications (Rize's popups are in the origin story), so it only ever *accompanies* voice for gentle moments (lead alerts, wrap-up, lunch) and is skipped when the full-screen overlay is up; anything that must land goes through voice + overlay. Recompile: `swiftc -O toast.swift -o bin/toast`. |
 | `miccheck.swift` → `bin/miccheck` | Mic-active join signal. Recompile: `swiftc -O miccheck.swift -o bin/miccheck`. |
 | `camcheck.swift` → `bin/camcheck` | Camera-active join signal (CoreMediaIO). Recompile: `swiftc -O camcheck.swift -o bin/camcheck`. |
-| `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and the flock dies with its process, so the queue can't jam. |
-| `tests/test_join.py` | Plain-assert tests for `joined_for` (run: `venv/bin/python tests/test_join.py`). |
+| `remindercheck.swift` → `bin/remindercheck` | Dumps incomplete **Apple Reminders** as JSON (EventKit). Needs a one-time Reminders permission — the prompt only appears because an Info.plist is **linked into the binary**, so recompile with: `swiftc -O remindercheck.swift -o bin/remindercheck -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker remindercheck-info.plist` (a recompile changes the binary's identity → macOS may re-ask once). |
+| `audioroute.swift` → `bin/audioroute` | `check` = JSON of the default output device + transport (spots Bluetooth); `play <file> --device <id>` = play to a SPECIFIC device (afplay can't). Powers speaker mirroring. Recompile: `swiftc -O audioroute.swift -o bin/audioroute`. |
+| `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and the flock dies with its process, so the queue can't jam. Also: **strips emoji** before synthesis ('🌸 Standup' was read as 'cherry blossom standup'); `--soft` = the in-call register (quieter playback AND gentler synthesis: `in_call_voice` volume/rate/pitch); `--incall` = normal voice but no speaker mirroring; **speaker mirroring** = when the default output is Bluetooth and no call is live, the line ALSO plays on the built-in speakers via `bin/audioroute` — headphones on the desk were swallowing announcements (`speaker_mirror.enabled`). |
+| `tests/test_join.py` | Plain-assert tests for `joined_for` (run: `venv/bin/python tests/test_join.py`; same pattern: `test_wrapup.py`, `test_reminders.py`, `test_voice_text.py`). |
 | `menubar.py` | 🌸 menu-bar health + Preferences. |
 | `phrases.json` | Persona lines, ~20 per situation, picked at random. |
 | `config.json` | All settings. Brain re-reads it every tick. |
@@ -61,6 +63,7 @@ customise via `config.json` — name, assistant_name, voice — and `phrases.jso
 - When **super annoyed** (`overdue_upset`), the line opens with his name then a **`...` pause** ("Sujit... now I'm genuinely upset...").
 - Otherwise uses his name **"every now and then"**, not every line — capped by `name_frequency` (default 0.4).
 - **Morning greeting ALWAYS uses his name** (`briefing_greeting` is in `always_name`), and there's **no comma** between greeting and name so it flows tight ("Good morning Sujit!" — he disliked the pause).
+- **In-call register (July 2026, he asked for this — twice):** while ANY call is live (mic/cam/Zoom — the same `in_call` signal wrap-up uses), every announcement about *another* meeting goes **short + soft + CALM** — like a person leaning in, not an announcer. Two halves: (1) dedicated short phrase banks `lead_incall` / `starting_incall` / `overdue_incall`, all **purely informational — zero attitude**: the overdue one replaces the gentle→firm→upset tiers while he's mid-call, and after the first version shipped he explicitly said even a *quietly pointed* tone ("they're waiting", "don't make me get loud") was distracting mid-conversation, so those lines carry **no guilt, no urgency theatre**; the burning-red overlay carries ALL escalation during calls (`overdue_incall` is deliberately NOT in `always_name` — the name-when-annoyed rule doesn't apply because she isn't annoyed here); (2) voice.py's `--soft` flag synthesizes gentler (lower pitch, slower, quieter) AND switches to the **plain `en-IN-NeerjaNeural`** voice — the Expressive variant's emotional inflection was part of what annoyed him (`in_call_voice.edge_voice`). Don't "fix" the nag tiers or the expressive voice back in during calls.
 
 **Language:**
 - **English only.** Marathi was considered and **dropped** (Siri can't speak Marathi; event titles are English anyway). If revisited: free neural Marathi exists via `edge-tts mr-IN-AarohiNeural/ManoharNeural`, or local Kokoro/Qwen.
@@ -74,11 +77,16 @@ customise via `config.json` — name, assistant_name, voice — and `phrases.jso
 2. an uplifting **"what a beautiful day / life is beautiful"** line, then
 3. the **agenda** — **one-off meetings called out first** (the ones he forgets), then recurring, then
 4. a nudge about **invites he hasn't responded to**, then
-5. a **closing sign-off** ("Thank you… have a good day") so he knows she's finished.
+5. **today's tasks** from Apple Reminders (with times where set) plus one line about overdue ones, then
+6. a **closing sign-off** ("Thank you… have a good day") so he knows she's finished.
 
 **Wrap-up warning** (July 2026): voice-only nudge ~5 min before the *current* meeting ends — "about 5 minutes left, {next} is at {time}" — the mirror image of the join nag, for back-to-back days. Deliberately narrow so it never becomes noise: once per meeting, only if he's actually in it (acked, or mic/cam/Zoom live), and only when another meeting starts within `wrap_up.next_within_min` of this one ending; if nothing follows, overrunning is his call and Tara stays quiet. Config `wrap_up` {enabled, lead_min, next_within_min}; phrases in `wrap_up`; tests in `tests/test_wrapup.py`.
 
 **Lunch:** he forgets lunch when meetings sneak up. Nudge him at the **last good gap before an afternoon meeting** ("free until your 2 PM — go eat now"). Window `12:30–14:00`, min gap 20 min. If back-to-back through lunch, one caring "don't skip lunch" warning.
+
+**Task reminders (July 2026):** Apple Reminders is the task store — he adds tasks by voice from phone/watch ("Hey Siri, remind me…"), and **recurring reminders cover scheduled chores** (timesheet every Friday, feedback cycles) since each occurrence comes back with a fresh `id@due` key. `bin/remindercheck` dumps incomplete reminders each tick; a **timed** task gets one spoken line as it comes due + one follow-up (`follow_up_min`) if still incomplete — completing it in Reminders is the ack. Tasks that came due long ago (`window_min`, Mac asleep) are marked **stale silently** — never greet him with a barrage of ancient nags; the briefing covers them instead (due-today list + one overdue line). **Date-only tasks never fire a timed alert**, they belong to the briefing. `fetch_reminders` returns **None** (not `[]`) when access fails, so a TCC hiccup can't wipe announce-state; failures back off `retry_fail_min`. Tests: `tests/test_reminders.py`.
+
+**Bluetooth-headphones trap (July 2026):** headphones *connected but not worn* swallowed announcements. True on-head detection isn't possible for generic BT headphones, so voice.py **mirrors** every line to the built-in speakers (via `bin/audioroute play`) whenever the default output transport is Bluetooth **and no call is live** (mid-call, audio must stay in his ear — `--incall`/`--soft` suppress mirroring). Worst case he hears it twice; he never hears silence.
 
 **RSVP-aware** (he asked for this): read his `PARTSTAT` per event — **declined → skip entirely**, **not-responded / tentative → remind only** (lead + overlay, no auto-open, no escalating nag), **accepted → full**.
 
@@ -91,7 +99,10 @@ customise via `config.json` — name, assistant_name, voice — and `phrases.jso
 `overlay_lead_min` (default 3; brain adds +0.5 min slack so a 60s tick can't slip it a minute late),
 `voice_gap_sec` (silence between queued announcements), `overdue_nag_minutes`, `overlay_theme`, `lunch` {enabled, earliest,
 latest, min_minutes}, `rsvp` {accepted/needs_action/tentative/declined → full|remind|skip},
-`work_hours`, `briefing_time`, `fetch_interval_sec`, `stale_alert_after_min`.
+`work_hours`, `briefing_time`, `fetch_interval_sec`, `stale_alert_after_min`,
+`in_call_voice` {enabled, volume 0–1, edge_volume/edge_rate/edge_pitch — the soft in-call register},
+`speaker_mirror` {enabled — mirror to built-in speakers when output is Bluetooth and no call is live},
+`reminders` {enabled, lists ([] = all), window_min, follow_up_min, retry_fail_min}.
 
 ## How to extend
 
@@ -107,6 +118,7 @@ VENV=~/.meeting-assistant/venv/bin/python
 $VENV ~/.meeting-assistant/brain.py --tick       # run one tick by hand
 $VENV ~/.meeting-assistant/brain.py --briefing    # hear the morning briefing now
 $VENV ~/.meeting-assistant/brain.py --status      # health
+$VENV ~/.meeting-assistant/brain.py --tasks       # what remindercheck sees (JSON)
 tail -f ~/.meeting-assistant/logs/assistant.log
 launchctl bootout gui/$(id -u)/com.tara-assistant.brain    # pause
 ~/.meeting-assistant/uninstall.sh                 # remove agents (keeps files)
@@ -127,3 +139,4 @@ launchctl bootout gui/$(id -u)/com.tara-assistant.brain    # pause
 - Mac must be awake for the brain. Phone layers cover the rest.
 - edge-tts needs internet (falls back to `say` offline) and is an unofficial use of Edge voices — could break; that's the argument for a local engine later.
 - Secret-feed changes can lag a few minutes on Google's side for just-added meetings.
+- Recompiling `remindercheck` changes its code signature, so macOS may show the Reminders permission prompt again (once). If task reminders go quiet after a recompile, run `brain.py --tasks` and check System Settings → Privacy & Security → Reminders.

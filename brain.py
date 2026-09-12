@@ -90,6 +90,24 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "seconds": 8,                 # corner popup lifetime
     },
+    "in_call_voice": {                # while ANY call is live, alerts switch to a
+        "enabled": True,              # short + soft register: quieter, slower,
+        "volume": 0.35,               # lower-pitched — a person leaning in, not
+        "edge_volume": "-40%",        # an announcer (voice.py applies these)
+        "edge_rate": "-12%",
+        "edge_pitch": "-6Hz",
+        "edge_voice": "en-IN-NeerjaNeural",  # the PLAIN voice: no expressive
+    },                                       # inflection while he's concentrating
+    "speaker_mirror": {               # Bluetooth headphones on the desk swallow
+        "enabled": True,              # announcements — mirror to built-in speakers
+    },                                # when default output is BT and no call is live
+    "reminders": {                    # Apple Reminders → spoken task nudges
+        "enabled": True,
+        "lists": [],                  # limit to these list names ([] = all lists)
+        "window_min": 30,             # announce a due task at most this late
+        "follow_up_min": 30,          # one follow-up if still not completed
+        "retry_fail_min": 30,         # back off this long after an access failure
+    },
 }
 
 log = logging.getLogger("brain")
@@ -161,15 +179,24 @@ def acquire_lock():
 VOICE_WORKER = BASE / "voice.py"
 
 
-def speak(text: str, cfg: dict) -> None:
+def speak(text: str, cfg: dict, in_call: bool = False) -> None:
     """Speak in the assistant's voice, non-blocking. Each utterance is handed to
     a detached voice.py worker; workers synthesize in parallel (edge-tts, with a
     macOS `say` fallback so a reminder is NEVER lost to a network blip) but
     serialize PLAYBACK through a queue with a short gap between lines — two
-    announcements landing on the same tick used to talk over each other."""
-    log.info("speak: %s", text)
+    announcements landing on the same tick used to talk over each other.
+
+    in_call=True → the soft register (--soft: quiet, slower, lower — she leans
+    in instead of announcing over the people he's talking to). If the soft
+    register is disabled in config, --incall still suppresses speaker mirroring
+    so nothing leaks into the room mid-meeting."""
+    log.info("speak%s: %s", " (in-call)" if in_call else "", text)
+    args = [sys.executable, str(VOICE_WORKER), text]
+    if in_call:
+        soft_on = cfg.get("in_call_voice", {}).get("enabled", True)
+        args.append("--soft" if soft_on else "--incall")
     try:
-        subprocess.Popen([sys.executable, str(VOICE_WORKER), text],
+        subprocess.Popen(args,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     except Exception as exc:  # noqa: BLE001
@@ -525,6 +552,113 @@ def alert_level(ev: dict, cfg: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# task reminders (Apple Reminders via bin/remindercheck)
+# --------------------------------------------------------------------------- #
+REMINDERS_BIN = BIN / "remindercheck"
+
+
+def fetch_reminders(state: dict, cfg: dict, tz: ZoneInfo) -> list[dict] | None:
+    """Incomplete Apple Reminders, or None when unavailable (disabled, helper
+    missing, access denied/failed). Callers must not read None as 'no tasks' —
+    that would wipe reminder state on a permissions hiccup and re-announce
+    everything later. Recurring reminders arrive as their next occurrence, so a
+    weekly 'submit timesheet' comes back every week."""
+    rc = cfg.get("reminders", {})
+    if not rc.get("enabled", True) or not REMINDERS_BIN.exists():
+        return None
+    now = datetime.now(tz)
+    last_fail = state.get("reminders_last_fail")
+    if last_fail and (now - datetime.fromisoformat(last_fail)).total_seconds() / 60 \
+            < rc.get("retry_fail_min", 30):
+        return None
+    try:
+        out = subprocess.run([str(REMINDERS_BIN)], capture_output=True, text=True,
+                             timeout=15)
+        data = json.loads(out.stdout)
+    except Exception as exc:  # noqa: BLE001 (timeout = TCC prompt pending; bad JSON)
+        log.warning("remindercheck failed: %s", type(exc).__name__)
+        state["reminders_last_fail"] = now.isoformat()
+        return None
+    if not isinstance(data, list):  # {"error": "denied"}
+        log.warning("Reminders access denied — grant it in System Settings → "
+                    "Privacy & Security → Reminders")
+        state["reminders_last_fail"] = now.isoformat()
+        return None
+    state.pop("reminders_last_fail", None)
+    wanted = rc.get("lists") or []
+    rems = []
+    for r in data:
+        if wanted and r.get("list") not in wanted:
+            continue
+        due_dt = None
+        if r.get("due"):
+            try:
+                due_dt = datetime.fromisoformat(r["due"])
+                due_dt = due_dt.astimezone(tz) if due_dt.tzinfo else due_dt.replace(tzinfo=tz)
+            except ValueError:
+                pass
+        rems.append({**r, "due_dt": due_dt})
+    return rems
+
+
+def reminder_actions(rems: list[dict], bucket: dict, now: datetime, *,
+                     window_min: int = 30, follow_up_min: int = 30) -> list[tuple]:
+    """Decide which timed reminders deserve a line THIS tick (pure — no I/O).
+
+    Returns (reminder, kind) pairs: 'due' as a task comes due, 'followup' once
+    more if it's still incomplete follow_up_min later, and 'stale' for tasks
+    that came due ages ago (Mac was asleep, or the feature was just enabled) —
+    those get marked silently instead of greeting him with a barrage of ancient
+    nags; the briefing covers them. Date-only reminders never fire here: they
+    belong to the briefing, not to an arbitrary midnight alarm."""
+    acts = []
+    for r in rems:
+        if not r.get("has_time") or not r.get("due_dt"):
+            continue
+        over_min = (now - r["due_dt"]).total_seconds() / 60
+        if over_min < 0:
+            continue
+        rec = bucket.get(f"{r['id']}@{r['due']}", {})
+        if not rec.get("announced"):
+            acts.append((r, "due" if over_min <= window_min else "stale"))
+        elif (not rec.get("followed_up") and not rec.get("stale")
+              and (now - datetime.fromisoformat(rec["announced"])).total_seconds() / 60
+              >= follow_up_min):
+            acts.append((r, "followup"))
+    return acts
+
+
+def maybe_reminders(rems: list[dict], state: dict, cfg: dict, now: datetime,
+                    in_call: bool) -> None:
+    """Speak task nudges; completing the task in Reminders is the natural ack
+    (a completed task simply stops coming back from remindercheck)."""
+    rc = cfg.get("reminders", {})
+    bucket = state.setdefault("reminders", {})
+    overlay_up = any(pid_alive(r.get("pid")) for r in state.get("overlay", {}).values())
+    for r, kind in reminder_actions(rems, bucket, now,
+                                    window_min=rc.get("window_min", 30),
+                                    follow_up_min=rc.get("follow_up_min", 30)):
+        rec = bucket.setdefault(f"{r['id']}@{r['due']}", {})
+        if kind == "stale":
+            rec.update({"announced": now.isoformat(), "stale": True})
+            continue
+        if kind == "due":
+            rec["announced"] = now.isoformat()
+            speak(pick("reminder_due", cfg, title=r["title"]), cfg, in_call=in_call)
+        else:
+            rec["followed_up"] = now.isoformat()
+            speak(pick("reminder_followup", cfg, title=r["title"]), cfg, in_call=in_call)
+        if not overlay_up:  # pointless behind the full-screen shield
+            show_toast("Reminder", r["title"], cfg)
+        log.info("task reminder (%s): %r", kind, r["title"])
+    # completed / deleted / rescheduled occurrences drop out of the bucket
+    live = {f"{r['id']}@{r['due']}" for r in rems if r.get("due")}
+    for k in list(bucket):
+        if k not in live:
+            bucket.pop(k)
+
+
+# --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
 def safe_id(key: str) -> str:
@@ -580,7 +714,8 @@ def fail_loud_check(state: dict, cfg: dict, tz: ZoneInfo) -> None:
 # --------------------------------------------------------------------------- #
 # briefing
 # --------------------------------------------------------------------------- #
-def maybe_briefing(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo) -> None:
+def maybe_briefing(events: list[dict], reminders: list[dict] | None, state: dict,
+                   cfg: dict, tz: ZoneInfo, in_call: bool = False) -> None:
     now = datetime.now(tz)
     bt = datetime.strptime(cfg["briefing_time"], "%H:%M").time()
     today = now.date().isoformat()
@@ -591,19 +726,47 @@ def maybe_briefing(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo) -> 
     if not (target <= now <= target + timedelta(minutes=30)):
         return
     state["last_briefing_date"] = today
-    speak_briefing(events, cfg, tz)
+    speak_briefing(events, cfg, tz, reminders=reminders, in_call=in_call)
 
 
-def speak_briefing(events: list[dict], cfg: dict, tz: ZoneInfo) -> None:
+def briefing_task_lines(reminders: list[dict], cfg: dict, now: datetime) -> list[str]:
+    """Task sentences for the briefing: what's due today (with times where they
+    exist), plus one nudge about anything still open from earlier days."""
+    due_today, overdue = [], 0
+    for r in reminders:
+        d = r.get("due_dt")
+        if not d:
+            continue
+        if d.date() == now.date():
+            due_today.append(r)
+        elif d.date() < now.date():
+            overdue += 1
+    parts = []
+    if due_today:
+        due_today.sort(key=lambda r: (not r.get("has_time"), r["due_dt"]))
+        names = [f"{r['title']} at {fmt_time(r['due_dt'])}"
+                 if r.get("has_time") and r["due_dt"] > now else r["title"]
+                 for r in due_today[:5]]
+        tasks = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f", and {names[-1]}"
+        parts.append(pick("briefing_tasks", cfg, tasks=tasks))
+    if overdue:
+        k = "one task" if overdue == 1 else f"{overdue} tasks"
+        parts.append(pick("briefing_tasks_overdue", cfg, k=k))
+    return parts
+
+
+def speak_briefing(events: list[dict], cfg: dict, tz: ZoneInfo,
+                   reminders: list[dict] | None = None, in_call: bool = False) -> None:
     now = datetime.now(tz)
     today = sorted([e for e in events
                     if e["start"] >= now and e["start"].date() == now.date()
                     and e["partstat"] != "DECLINED"],  # don't brief on declined
                    key=lambda e: e["start"])
     greeting = pick("briefing_greeting", cfg)  # good morning + beautiful-day spirit
+    task_parts = briefing_task_lines(reminders or [], cfg, now)
     if not today:
-        speak(" ".join([greeting, pick("briefing_no_meetings", cfg),
-                        pick("briefing_close", cfg)]), cfg)
+        speak(" ".join([greeting, pick("briefing_no_meetings", cfg), *task_parts,
+                        pick("briefing_close", cfg)]), cfg, in_call=in_call)
         return
     oneoffs = [e for e in today if not e["recurring"]]
     regulars = [e for e in today if e["recurring"]]
@@ -624,13 +787,15 @@ def speak_briefing(events: list[dict], cfg: dict, tz: ZoneInfo) -> None:
     unresponded = [e for e in today if e["partstat"] == "NEEDS-ACTION"]
     if unresponded:
         parts.append(pick("briefing_unresponded", cfg))
+    parts.extend(task_parts)                   # today's tasks, after the agenda
     parts.append(pick("briefing_close", cfg))  # sign-off so you know she's done
-    speak(" ".join(p for p in parts if p), cfg)
-    log.info("briefing read: %d meetings (%d one-off, %d unresponded)",
-             n, len(oneoffs), len(unresponded))
+    speak(" ".join(p for p in parts if p), cfg, in_call=in_call)
+    log.info("briefing read: %d meetings (%d one-off, %d unresponded, %d task lines)",
+             n, len(oneoffs), len(unresponded), len(task_parts))
 
 
-def maybe_lunch(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo) -> None:
+def maybe_lunch(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo,
+                in_call: bool = False) -> None:
     """Nudge to lunch at the last good gap before afternoon meetings encroach.
 
     Waits until you're actually free, then if there's a >= min_minutes gap before
@@ -664,12 +829,12 @@ def maybe_lunch(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo) -> Non
             state["last_lunch_date"] = today
             if next_meeting and next_meeting["start"] <= latest + timedelta(hours=1):
                 speak(pick("lunch_free", cfg, time=fmt_time(next_meeting["start"]),
-                           title=next_meeting["title"]), cfg)
+                           title=next_meeting["title"]), cfg, in_call=in_call)
                 show_toast("Lunch time",
                            f"free until {next_meeting['title']} at "
                            f"{fmt_time(next_meeting['start'])}", cfg)
             else:
-                speak(pick("lunch_clear", cfg), cfg)
+                speak(pick("lunch_clear", cfg), cfg, in_call=in_call)
                 show_toast("Lunch time", "your afternoon is clear — go eat", cfg)
             log.info("lunch nudge fired (free window)")
             return
@@ -677,7 +842,7 @@ def maybe_lunch(events: list[dict], state: dict, cfg: dict, tz: ZoneInfo) -> Non
     # back-to-back through the whole window: at the latest time, insist once
     if now >= latest - timedelta(minutes=1):
         state["last_lunch_date"] = today
-        speak(pick("lunch_backtoback", cfg), cfg)
+        speak(pick("lunch_backtoback", cfg), cfg, in_call=in_call)
         log.info("lunch nudge fired (back-to-back warning)")
 
 
@@ -720,8 +885,10 @@ def maybe_wrapup(events: list[dict], state: dict, cfg: dict, now: datetime,
             continue
         wrapped[ev["key"]] = now.isoformat()
         mins_phrase = "a minute" if mins_left < 1.5 else f"{int(round(mins_left))} minutes"
+        # a wrap-up is by definition spoken mid-call — always the soft register
         speak(pick("wrap_up", cfg, mins=mins_phrase,
-                   title=nxt["title"], time=fmt_time(nxt["start"])), cfg)
+                   title=nxt["title"], time=fmt_time(nxt["start"])), cfg,
+              in_call=in_call)
         show_toast(f"Wrap up — {mins_phrase} left",
                    f"{nxt['title']} is next at {fmt_time(nxt['start'])}", cfg)
         log.info("wrap-up warning for %r (next: %r)", ev["title"], nxt["title"])
@@ -755,14 +922,14 @@ def tick() -> None:
     fetch_feed(state, cfg, tz)
     fail_loud_check(state, cfg, tz)
     events = load_events(cfg, tz, feed_changed=state.pop("_feed_changed", False))
-    maybe_briefing(events, state, cfg, tz)
-    maybe_lunch(events, state, cfg, tz)
 
     now = datetime.now(tz)
     lead_times = sorted(cfg["lead_times_min"], reverse=True)
     max_lead = lead_times[0] if lead_times else 5
 
     # --- device tracking for rising-edge join detection -------------------- #
+    # (Checked before any announcement: in_call also switches the voice to the
+    # short + soft register — she must not talk over the people he's talking to.)
     # The mic/camera "is running" flags are unreliable as a bare join signal: a
     # Slack huddle, OBS, a VM, or a stray Meet tab can hold a device open for
     # hours, which used to read as "joined" and silently stand every meeting down
@@ -783,9 +950,15 @@ def tick() -> None:
     cam_on_since = (datetime.fromisoformat(dev["cam"]["on_since"])
                     if dev.get("cam", {}).get("on_since") else None)
     zoom_live = zoom_in_meeting()
+    in_call = mic_active or cam_active or zoom_live
+    soft = in_call and cfg.get("in_call_voice", {}).get("enabled", True)
 
-    maybe_wrapup(events, state, cfg, now,
-                 in_call=mic_active or cam_active or zoom_live)
+    reminders = fetch_reminders(state, cfg, tz)
+    maybe_briefing(events, reminders, state, cfg, tz, in_call)
+    maybe_lunch(events, state, cfg, tz, in_call)
+    if reminders is not None:
+        maybe_reminders(reminders, state, cfg, now, in_call)
+    maybe_wrapup(events, state, cfg, now, in_call=in_call)
 
     live_keys = set()
     for ev in events:
@@ -834,7 +1007,9 @@ def tick() -> None:
                         if bigger >= lt:
                             fired[str(bigger)] = True
                     mins_phrase = f"{lt} minutes" if lt != 1 else "1 minute"
-                    speak(pick("lead", cfg, title=ev["title"], mins=mins_phrase), cfg)
+                    speak(pick("lead_incall" if soft else "lead", cfg,
+                               title=ev["title"], mins=mins_phrase), cfg,
+                          in_call=in_call)
                     if not had_overlay:  # pointless behind the full-screen shield
                         show_toast(ev["title"],
                                    f"starts in {mins_phrase} · {fmt_time(ev['start'])}",
@@ -874,7 +1049,8 @@ def tick() -> None:
         if mins_to <= 0 and key not in state["opened"]:
             if ev["url"] and level == "full":   # only auto-open for accepted meetings
                 open_url(ev["url"])
-            speak(pick("starting_now", cfg, title=ev["title"]), cfg)
+            speak(pick("starting_incall" if soft else "starting_now", cfg,
+                       title=ev["title"]), cfg, in_call=in_call)
             state["opened"][key] = now.isoformat()
             fired["nag"] = now.isoformat()  # hold the first nag ~1 min after start
 
@@ -884,11 +1060,18 @@ def tick() -> None:
         if not snoozed and not joined and mins_to <= 0 and level == "full":
             last_nag = fired.get("nag")
             if not last_nag or (now - datetime.fromisoformat(last_nag)).total_seconds() >= 55:
-                overdue_min = -mins_to
-                tier = ("overdue_gentle" if overdue_min < 2
-                        else "overdue_firm" if overdue_min < 5
-                        else "overdue_upset")
-                speak(pick(tier, cfg, title=ev["title"]), cfg)
+                if soft:
+                    # he's mid-call: she stays quiet-but-pointed instead of
+                    # escalating over the people he's talking to; the overlay
+                    # carries the loud escalation (it's already burning red)
+                    speak(pick("overdue_incall", cfg, title=ev["title"]), cfg,
+                          in_call=True)
+                else:
+                    overdue_min = -mins_to
+                    tier = ("overdue_gentle" if overdue_min < 2
+                            else "overdue_firm" if overdue_min < 5
+                            else "overdue_upset")
+                    speak(pick(tier, cfg, title=ev["title"]), cfg)
                 fired["nag"] = now.isoformat()
 
     # prune state for events no longer in window
@@ -964,7 +1147,20 @@ def main() -> None:
         return
     if arg == "--briefing":
         cfg = load_config(); tz = ZoneInfo(cfg["timezone"])
-        speak_briefing(load_events(cfg, tz, feed_changed=False), cfg, tz)
+        rems = fetch_reminders(load_state(), cfg, tz)
+        speak_briefing(load_events(cfg, tz, feed_changed=False), cfg, tz,
+                       reminders=rems)
+        return
+    if arg == "--tasks":
+        # debug: show what remindercheck sees (also triggers the access prompt)
+        cfg = load_config(); tz = ZoneInfo(cfg["timezone"])
+        rems = fetch_reminders({}, cfg, tz)
+        if rems is None:
+            print("reminders unavailable (disabled, helper missing, or access "
+                  "denied — see logs/assistant.log)")
+        else:
+            print(json.dumps([{k: v for k, v in r.items() if k != "due_dt"}
+                              for r in rems], indent=2))
         return
     if arg == "--status":
         state = load_state()

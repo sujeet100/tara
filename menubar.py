@@ -157,6 +157,16 @@ class MeetingAssistant(rumps.App):
         lunch.state = 1 if cfg.get("lunch", {}).get("enabled", True) else 0
         items.append(lunch)
 
+        tasks = rumps.MenuItem("Task reminders (Apple Reminders)",
+                               callback=self.toggle_reminders)
+        tasks.state = 1 if cfg.get("reminders", {}).get("enabled", True) else 0
+        items.append(tasks)
+
+        incall = rumps.MenuItem("Soft voice while on a call",
+                                callback=self.toggle_incall)
+        incall.state = 1 if cfg.get("in_call_voice", {}).get("enabled", True) else 0
+        items.append(incall)
+
         items += [
             rumps.separator,
             rumps.MenuItem("Set calendar link…", callback=self.set_calendar),
@@ -200,6 +210,18 @@ class MeetingAssistant(rumps.App):
         cfg = load_cfg()
         lunch = cfg.setdefault("lunch", {})
         lunch["enabled"] = not lunch.get("enabled", True)
+        save_cfg(cfg); self.build_menu()
+
+    def toggle_reminders(self, _):
+        cfg = load_cfg()
+        rc = cfg.setdefault("reminders", {})
+        rc["enabled"] = not rc.get("enabled", True)
+        save_cfg(cfg); self.build_menu()
+
+    def toggle_incall(self, _):
+        cfg = load_cfg()
+        icv = cfg.setdefault("in_call_voice", {})
+        icv["enabled"] = not icv.get("enabled", True)
         save_cfg(cfg); self.build_menu()
 
     def _read_env(self, key):

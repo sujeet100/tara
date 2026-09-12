@@ -17,7 +17,7 @@ CFG = dict(brain.DEFAULT_CONFIG)
 
 spoken: list[str] = []
 brain.pick = lambda cat, cfg, **kw: f"{cat}:{kw.get('title')}"
-brain.speak = lambda text, cfg: spoken.append(text)
+brain.speak = lambda text, cfg, in_call=False: spoken.append(text)
 
 
 def ev(key, start, end, partstat="ACCEPTED"):

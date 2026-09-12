@@ -12,10 +12,16 @@ python3 -m venv "$APP/venv"
 
 # 2. compile the Swift helpers
 mkdir -p "$APP/bin" "$APP/cache" "$APP/logs" "$APP/runtime"
-swiftc -O "$APP/overlay.swift"  -o "$APP/bin/overlay"
-swiftc -O "$APP/miccheck.swift" -o "$APP/bin/miccheck"
-swiftc -O "$APP/camcheck.swift" -o "$APP/bin/camcheck"
-swiftc -O "$APP/toast.swift"    -o "$APP/bin/toast"
+swiftc -O "$APP/overlay.swift"    -o "$APP/bin/overlay"
+swiftc -O "$APP/miccheck.swift"   -o "$APP/bin/miccheck"
+swiftc -O "$APP/camcheck.swift"   -o "$APP/bin/camcheck"
+swiftc -O "$APP/toast.swift"      -o "$APP/bin/toast"
+swiftc -O "$APP/audioroute.swift" -o "$APP/bin/audioroute"
+# remindercheck needs an Info.plist linked in, or macOS refuses to show the
+# one-time Reminders-access prompt (task reminders just stay silent without it)
+swiftc -O "$APP/remindercheck.swift" -o "$APP/bin/remindercheck" \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker "$APP/remindercheck-info.plist"
 
 # 3. config + secret
 [ -f "$APP/config.json" ] || cp "$APP/config.example.json" "$APP/config.json"
@@ -55,6 +61,8 @@ make_agent brain   "<key>StartInterval</key><integer>60</integer><key>RunAtLoad<
 make_agent menubar "<key>KeepAlive</key><true/><key>RunAtLoad</key><true/>" "menubar.py" ""
 
 echo "Done — agents installed; the brain ticks every minute."
+echo "→ Task reminders: macOS will ask once for Reminders access — click Allow."
+echo "  (Check what she sees anytime: $PY $APP/brain.py --tasks)"
 if grep -q "XXXXXXXX" "$APP/.env" 2>/dev/null; then
   echo "→ Finish setup (name + calendar link, validated): $PY $APP/brain.py --setup"
 fi
