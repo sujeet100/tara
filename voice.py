@@ -18,6 +18,10 @@ The fix, in three steps per worker:
 3. PLAY holding an exclusive flock on runtime/voice.lock, then keep it for
    `voice_gap_sec` more so consecutive announcements get a breath of silence
    between them. The kernel drops the lock if we die, so no stale-lock state.
+   Both the queue wait and the lock are BOUNDED, and a line that has aged past
+   `voice_max_age_sec` by the time its turn arrives is dropped unspoken. System
+   sleep suspends a worker mid-playback, which used to back the whole queue up
+   behind it and then flush days of obsolete announcements on wake.
 
 Flags (after the text argument):
   --soft    the user is on a call: speak like a person leaning in, not an
@@ -65,6 +69,8 @@ AUDIOROUTE_BIN = BASE / "bin" / "audioroute"
 TICKET_STALE_SEC = 300   # a ticket this old means its worker died — ignore it
 WAIT_TURN_TIMEOUT = 240  # never wait longer than this for the queue (fail loud > fail mute)
 SYNTH_TIMEOUT = 30       # edge-tts network budget before falling back to `say`
+LOCK_TIMEOUT = 60        # a holder stuck this long is jammed; go ahead without it
+DEFAULT_MAX_AGE_SEC = 120  # by the time we reach the front, is this still worth saying?
 
 DEFAULT_TTS = {
     "engine": "edge",
@@ -162,9 +168,23 @@ def mirror_target(cfg: dict, in_call: bool) -> int | None:
     return builtin if builtin and builtin != info.get("default_id") else None
 
 
-def wait_turn(my_ticket: Path) -> None:
+def sweep_queue() -> None:
+    """Delete tickets whose worker is long gone.
+
+    A worker normally unlinks its own ticket, but one killed outright — which is
+    what system sleep does — never runs its finally block, so the directory
+    silently accumulated months of orphans."""
+    for t in QUEUE_DIR.glob("*.ticket"):
+        try:
+            if time.time() - t.stat().st_mtime > TICKET_STALE_SEC:
+                t.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def wait_turn(my_ticket: Path, deadline: float) -> None:
     """Block until no fresh ticket is ahead of us (FIFO by nanosecond name)."""
-    deadline = time.time() + WAIT_TURN_TIMEOUT
+    deadline = min(deadline, time.time() + WAIT_TURN_TIMEOUT)
     while time.time() < deadline:
         ahead = [t for t in QUEUE_DIR.glob("*.ticket")
                  if t.name < my_ticket.name
@@ -173,6 +193,23 @@ def wait_turn(my_ticket: Path) -> None:
             return
         time.sleep(0.25)
     log.warning("queue wait timed out; speaking anyway")
+
+
+def grab_lock(lock, deadline: float) -> bool:
+    """Take the playback lock, but never wait on it forever.
+
+    A plain blocking flock is what turned a sleeping Mac into a dam: whoever held
+    the lock was suspended mid-playback, every later worker queued behind it, and
+    the whole backlog burst out on wake. Bounded waiting means the worst case is
+    two lines overlapping once, not a three-day replay."""
+    while time.time() < deadline:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            time.sleep(0.2)
+    log.warning("playback lock stuck; speaking without it")
+    return False
 
 
 def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
@@ -204,6 +241,7 @@ def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
 
 
 def main() -> None:
+    born = time.time()          # an announcement is only true for so long
     argv = sys.argv[1:]
     soft_flag = "--soft" in argv
     in_call = soft_flag or "--incall" in argv
@@ -215,23 +253,35 @@ def main() -> None:
     tts = {**DEFAULT_TTS, **cfg.get("tts", {})}
     soft = {**DEFAULT_SOFT, **cfg.get("in_call_voice", {})} if soft_flag else None
     gap = float(cfg.get("voice_gap_sec", 1.5))
+    max_age = float(cfg.get("voice_max_age_sec", DEFAULT_MAX_AGE_SEC))
+    expiry = born + max_age
     mirror_device = mirror_target(cfg, in_call)
 
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    sweep_queue()
     ticket = QUEUE_DIR / f"{time.time_ns():020d}-{os.getpid()}.ticket"
     ticket.write_text(text[:80])
 
     mp3 = None
     try:
         mp3 = synthesize(text, tts, soft)     # slow part, deliberately outside the queue
-        wait_turn(ticket)
+        wait_turn(ticket, expiry)
+        # Every announcement is about NOW — a meeting starting, a calendar that is
+        # down right this minute. If the queue held us past its shelf life, saying
+        # it anyway is worse than staying quiet: that is how a wake from sleep came
+        # to replay days of "I can't read your calendar" at someone whose calendar
+        # was by then working fine.
+        if time.time() > expiry:
+            log.warning("dropped stale line (%.0fs old): %s", time.time() - born, text)
+            return
         with open(LOCK_FILE, "w") as lock:    # kernel releases on death — can't jam
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            held = grab_lock(lock, min(expiry, time.time() + LOCK_TIMEOUT))
             log.info("speaking (%s%s%s): %s", "edge" if mp3 else "say",
                      ", soft" if soft else "",
                      ", +speakers" if mirror_device else "", text)
             play(text, mp3, tts, soft, mirror_device)
-            time.sleep(gap)                   # breath of silence before the next line
+            if held:
+                time.sleep(gap)               # breath of silence before the next line
     finally:
         ticket.unlink(missing_ok=True)
         if mp3 is not None:

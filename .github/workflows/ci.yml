@@ -20,8 +20,11 @@ jobs:
 
       - name: Run tests
         run: |
-          python tests/test_join.py
-          python tests/test_wrapup.py
+          set -e
+          for t in tests/test_*.py; do
+            echo "--- $t"
+            python "$t"
+          done
 
       - name: Compile Swift helpers
         run: |
@@ -30,6 +33,7 @@ jobs:
           swiftc -O miccheck.swift -o bin/miccheck
           swiftc -O camcheck.swift -o bin/camcheck
           swiftc -O toast.swift    -o bin/toast
+          swiftc -O displaycheck.swift -o bin/displaycheck
 
       - name: Shell syntax check
         run: bash -n install.sh && bash -n uninstall.sh && bash -n preview-theme.sh

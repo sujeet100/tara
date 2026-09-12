@@ -43,6 +43,9 @@ CONFIG_FILE = BASE / "config.json"
 LOCK_FILE = BASE / "runtime" / "tick.lock"
 STOP_FILE = BASE / "stopped"   # presence = hard off switch; brain no-ops while it exists
 
+ERROR_KEY = "calendar-error"   # state["overlay"] slot for the fail-loud window
+WAKE_GAP_SEC = 300             # a tick gap bigger than this means the Mac was asleep
+
 DEFAULT_CONFIG = {
     "timezone": "",                   # empty = auto-detect from the system
     "name": "there",                  # your name (set in config.json)
@@ -65,8 +68,13 @@ DEFAULT_CONFIG = {
     "lead_times_min": [5, 2],         # spoken pre-alerts
     "overlay_lead_min": 3,            # full-screen overlay appears this early
     "voice_gap_sec": 1.5,             # silence between queued announcements
+    "voice_max_age_sec": 120,         # a queued line older than this is dropped unspoken
     "overdue_nag_minutes": 12,        # keep nagging this long past start, then give up
     "fetch_interval_sec": 300,        # re-download the feed at most this often
+    "fetch_timeout_sec": 120,         # read budget for the feed (it's ~12 MB — 20s
+                                      # was too tight and "timed out" read as "down")
+    "wake_grace_min": 1,              # must be continuously up this long before the
+                                      # fail-loud alarm may fire (see note_tick)
     "index_window_hours": 36,         # how far ahead to pre-expand events
     "index_rebuild_hours": 6,         # rebuild index at least this often
     "stale_alert_after_min": 60,      # fail-loud if no good fetch for this long
@@ -425,6 +433,40 @@ def read_calendar_url() -> str | None:
     return None
 
 
+def screen_awake() -> bool:
+    """Is the screen on — i.e. would Sujit actually see an overlay right now?
+
+    Optional refinement: `bin/displaycheck` reads display power state (no
+    permission, captures nothing) and settles the one case tick-continuity can't,
+    a dark wake long enough to run two ticks back to back. When the binary isn't
+    built we assume he IS there, because guessing 'asleep' would mute a real
+    alarm and that is the failure this whole app exists to prevent."""
+    displaycheck = BIN / "displaycheck"
+    if displaycheck.exists():
+        try:
+            out = subprocess.run([str(displaycheck)], capture_output=True,
+                                 text=True, timeout=5)
+            return out.stdout.strip() != "0"
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
+def feed_recovered(state: dict, now: datetime) -> None:
+    """The calendar is readable again — record it and take the alarm off screen.
+
+    Without this the fail-loud overlay outlived the fault it was reporting: it is
+    a separate detached process nobody tracked, so every re-alert added a window
+    and none of them ever went away. An alarm that stays up after the problem is
+    fixed is the same lie as an alarm that never fires."""
+    state["last_good_fetch"] = now.isoformat()
+    rec = state.get("overlay", {}).pop(ERROR_KEY, None)
+    if rec and pid_alive(rec.get("pid")):
+        kill_overlay(rec["pid"])
+        log.info("calendar readable again — dismissed the fail-loud overlay")
+    state.pop("last_stale_alert", None)
+
+
 def fetch_feed(state: dict, cfg: dict, tz: ZoneInfo) -> None:
     now = datetime.now(tz)
     last_attempt = state.get("last_fetch_attempt")
@@ -441,13 +483,17 @@ def fetch_feed(state: dict, cfg: dict, tz: ZoneInfo) -> None:
         headers["If-None-Match"] = state["etag"]
     if state.get("last_modified"):
         headers["If-Modified-Since"] = state["last_modified"]
+    # (10s to connect, a generous budget to read): the feed is ~12 MB, and a flat
+    # 20s total meant a merely SLOW link reported itself as a DEAD calendar — three
+    # days of ReadTimeout on a feed that downloads fine given room to finish.
+    timeout = (10, float(cfg.get("fetch_timeout_sec", 120)))
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
+        resp = requests.get(url, headers=headers, timeout=timeout)
     except Exception as exc:  # noqa: BLE001
         log.error("feed fetch error (network): %s", type(exc).__name__)
         return
     if resp.status_code == 304:
-        state["last_good_fetch"] = now.isoformat()  # cache confirmed current
+        feed_recovered(state, now)                  # cache confirmed current
         return
     if resp.status_code != 200:
         log.error("feed fetch HTTP %s", resp.status_code)
@@ -456,7 +502,7 @@ def fetch_feed(state: dict, cfg: dict, tz: ZoneInfo) -> None:
     (CACHE / "last.ics").write_bytes(resp.content)
     state["etag"] = resp.headers.get("ETag")
     state["last_modified"] = resp.headers.get("Last-Modified")
-    state["last_good_fetch"] = now.isoformat()
+    feed_recovered(state, now)
     state["_feed_changed"] = True  # triggers an index rebuild this tick
     log.info("feed refreshed (%d bytes)", len(resp.content))
 
@@ -699,6 +745,25 @@ def fail_loud_check(state: dict, cfg: dict, tz: ZoneInfo) -> None:
         return
     if not within_work_hours(now, cfg):
         return
+    # Don't alarm at a sleeping Mac. macOS "dark wakes" the machine for a few
+    # moments every hour or so with the lid shut, and launchd ticks us inside that
+    # window — so an alarm there is voice into a sleeping speaker and an overlay
+    # drawn on a dark screen. Those aren't warnings; they're the backlog that used
+    # to greet him on opening the lid. `up_since` is the start of the current
+    # UNBROKEN run of ticks (see note_tick), so requiring it to be wake_grace_min
+    # old means two things at once: the Mac is genuinely up rather than dark-waking,
+    # and the network has had a minute to come back before we call the calendar
+    # dead. Both cost us nothing against a staleness threshold measured in HOURS.
+    up_since = state.get("up_since")
+    up_min = ((now - datetime.fromisoformat(up_since)).total_seconds() / 60
+              if up_since else 0.0)
+    if up_min < cfg.get("wake_grace_min", 1):
+        log.info("fail-loud held: up for only %.1f min (asleep, or still settling)",
+                 up_min)
+        return
+    if not screen_awake():
+        log.info("fail-loud held: screen is asleep, nobody would see or hear it")
+        return
     last_alert = state.get("last_stale_alert")
     if last_alert:
         if (now - datetime.fromisoformat(last_alert)).total_seconds() / 60 < cfg["stale_realert_every_min"]:
@@ -706,9 +771,40 @@ def fail_loud_check(state: dict, cfg: dict, tz: ZoneInfo) -> None:
     msg = pick("calendar_error_never", cfg) if never else pick("calendar_error", cfg)
     log.error("FAIL-LOUD: calendar unreachable (never=%s)", never)
     speak(msg, cfg)
-    launch_overlay("calendar-error", "⚠️ Calendar unreachable",
-                   now.isoformat(), "", mode="error")
+    # ONE alarm window, reused. Each re-alert used to spawn another detached
+    # overlay and forget its pid, so a multi-day outage left a stack of identical
+    # windows to dismiss by hand. Re-speaking is the escalation; re-drawing isn't.
+    rec = state.setdefault("overlay", {}).get(ERROR_KEY, {})
+    if not pid_alive(rec.get("pid")):
+        pid = launch_overlay(ERROR_KEY, "⚠️ Calendar unreachable",
+                             now.isoformat(), "", mode="error")
+        state["overlay"][ERROR_KEY] = {"pid": pid, "launched": now.isoformat()}
     state["last_stale_alert"] = now.isoformat()
+
+
+def note_tick(state: dict, tz: ZoneInfo) -> bool:
+    """Record this tick, maintaining `up_since` — the start of the current unbroken
+    run of ticks. Returns True when that run just began.
+
+    launchd can't run us while the Mac sleeps, so a gap between ticks is our only
+    evidence of sleep, and the absence of gaps is our evidence of being properly
+    awake: at the desk we tick every 60s, whereas a dark wake gets us one lonely
+    tick an hour. Resetting the clock on every gap therefore distinguishes 'he
+    just opened the lid' from 'the machine is still shut and merely twitching',
+    which is what fail_loud_check needs. A fresh run also drops the fetch back-off
+    so the feed is retried immediately rather than waiting out fetch_interval_sec
+    on failure state cached from days ago."""
+    now = datetime.now(tz)
+    last = state.get("last_tick")
+    state["last_tick"] = now.isoformat()
+    if last and (now - datetime.fromisoformat(last)).total_seconds() <= WAKE_GAP_SEC:
+        state.setdefault("up_since", now.isoformat())
+        return False
+    state["up_since"] = now.isoformat()
+    state.pop("last_fetch_attempt", None)   # try the feed immediately on this tick
+    if last:
+        log.info("gap since last tick — the Mac was asleep; restarting the up-clock")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -919,6 +1015,7 @@ def tick() -> None:
     state.setdefault("opened", {})
     state.setdefault("wrapup", {})
 
+    note_tick(state, tz)
     fetch_feed(state, cfg, tz)
     fail_loud_check(state, cfg, tz)
     events = load_events(cfg, tz, feed_changed=state.pop("_feed_changed", False))
@@ -1077,7 +1174,7 @@ def tick() -> None:
     # prune state for events no longer in window
     for bucket in ("fired", "overlay", "acked", "snooze", "opened", "wrapup"):
         for k in list(state[bucket]):
-            if k not in live_keys and k != "calendar-error":
+            if k not in live_keys and k != ERROR_KEY:
                 # keep recently-acked briefly to avoid re-alerting; drop the rest
                 state[bucket].pop(k, None)
 
