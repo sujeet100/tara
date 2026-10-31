@@ -22,6 +22,11 @@ The fix, in three steps per worker:
    `voice_max_age_sec` by the time its turn arrives is dropped unspoken. System
    sleep suspends a worker mid-playback, which used to back the whole queue up
    behind it and then flush days of obsolete announcements on wake.
+   Playback is bounded too (play_budget, on the wall clock), and the holder
+   writes its pid and that budget into the lock file. A waiter NEVER talks over
+   a holder: one past its budget is jammed and gets evicted, one still within
+   it is waited for. The old "lock stuck, speak without it" escape turned a
+   single hung speaker-mirror player into every later line playing at once.
 
 Flags (after the text argument):
   --soft    the user is on a call: speak like a person leaning in, not an
@@ -71,7 +76,7 @@ AUDIOROUTE_BIN = BASE / "bin" / "audioroute"
 TICKET_STALE_SEC = 300   # a ticket this old means its worker died — ignore it
 WAIT_TURN_TIMEOUT = 240  # never wait longer than this for the queue (fail loud > fail mute)
 SYNTH_TIMEOUT = 30       # edge-tts network budget before falling back to `say`
-LOCK_TIMEOUT = 60        # a holder stuck this long is jammed; go ahead without it
+JAM_GRACE_SEC = 5        # a holder this far past its own playback budget is jammed
 DEFAULT_MAX_AGE_SEC = 120  # by the time we reach the front, is this still worth saying?
 
 DEFAULT_TTS = {
@@ -215,38 +220,133 @@ def sweep_queue() -> None:
             pass
 
 
+def play_budget(text: str) -> float:
+    """Seconds a line may take to play before we call it hung — generous, about
+    twice natural speech, so only a genuinely stuck player ever hits it."""
+    return 10 + 0.8 * len(text.split())
+
+
+def claim_lock(lock, until: float) -> None:
+    """Record who holds the playback lock and when they promise to be done, so a
+    waiter can tell a long line from a jammed one."""
+    lock.seek(0)
+    lock.truncate()
+    lock.write(f"{os.getpid()} {until:.0f}\n")
+    lock.flush()
+
+
+def release_lock(lock) -> None:
+    lock.seek(0)
+    lock.truncate()
+    lock.flush()
+    fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def jammed_holder() -> int | None:
+    """Pid of a lock holder that has overrun its own playback budget, else None.
+
+    Only a lock that is held RIGHT NOW counts — the record could otherwise be a
+    leftover from a worker long finished, and its pid since reused."""
+    try:
+        with open(LOCK_FILE, "a+") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe, fcntl.LOCK_UN)
+                return None                     # nobody holds it
+            except BlockingIOError:
+                pass
+            probe.seek(0)
+            pid_s, until_s = probe.read().split()[:2]
+        pid, until = int(pid_s), float(until_s)
+    except (OSError, ValueError):
+        return None
+    if pid == os.getpid() or time.time() < until + JAM_GRACE_SEC:
+        return None
+    return pid
+
+
+def evict(pid: int) -> None:
+    """Kill a jammed voice worker and everything it is playing.
+
+    Workers are session leaders (brain spawns them with start_new_session), so
+    killing the group also takes out a hung afplay/audioroute child. The command
+    line is checked first so a recycled pid can never take an innocent process
+    down. The worker never gets to run its own cleanup, so its ticket goes too —
+    otherwise it would hold the queue for TICKET_STALE_SEC from beyond the grave."""
+    try:
+        cmd = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True, timeout=5).stdout
+        if "voice.py" not in cmd or os.getpgid(pid) != pid:
+            return
+        log.warning("evicting jammed voice worker %d: %s", pid, cmd.strip()[:120])
+        os.killpg(pid, 9)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for t in QUEUE_DIR.glob(f"*-{pid}.ticket"):
+        t.unlink(missing_ok=True)
+
+
 def wait_turn(my_ticket: Path, deadline: float) -> None:
     """Block until no fresh ticket is ahead of us (FIFO by nanosecond name)."""
     deadline = min(deadline, time.time() + WAIT_TURN_TIMEOUT)
     while time.time() < deadline:
+        if (pid := jammed_holder()) is not None:
+            evict(pid)
         ahead = [t for t in QUEUE_DIR.glob("*.ticket")
                  if t.name < my_ticket.name
                  and time.time() - t.stat().st_mtime < TICKET_STALE_SEC]
         if not ahead:
             return
         time.sleep(0.25)
-    log.warning("queue wait timed out; speaking anyway")
+    log.warning("queue wait timed out")
 
 
 def grab_lock(lock, deadline: float) -> bool:
-    """Take the playback lock, but never wait on it forever.
+    """Take the playback lock by the deadline, or report that we couldn't.
 
-    A plain blocking flock is what turned a sleeping Mac into a dam: whoever held
-    the lock was suspended mid-playback, every later worker queued behind it, and
-    the whole backlog burst out on wake. Bounded waiting means the worst case is
-    two lines overlapping once, not a three-day replay."""
-    while time.time() < deadline:
+    Two ways this has gone wrong before. A plain blocking flock turned a
+    sleeping Mac into a dam that flushed days of backlog on wake. Its
+    replacement — wait a while, then "speak without it" — turned one hung
+    player into a permanent chorus: the holder never let go, so every later
+    line gave up and played over every other. So a waiter now never talks over
+    a holder. A holder that has overrun its own announced budget is jammed and
+    gets evicted; one that is legitimately mid-line is waited for, and if that
+    outlasts our deadline the caller drops the line as stale."""
+    while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except BlockingIOError:
-            time.sleep(0.2)
-    log.warning("playback lock stuck; speaking without it")
-    return False
+            pass
+        if (pid := jammed_holder()) is not None:
+            evict(pid)
+            continue
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def wait_all(procs: list, deadline: float) -> bool:
+    """Wait for every player to finish, killing them all at the deadline.
+
+    The deadline is wall-clock on purpose: a worker suspended by sleep mid-line
+    wakes far past it and cuts the line off instead of finishing an
+    announcement about a moment that has gone. True if they finished in time."""
+    while any(p.poll() is None for p in procs):
+        if time.time() >= deadline:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+            for p in procs:
+                p.wait()
+            return False
+        time.sleep(0.1)
+    return True
 
 
 def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
-         mirror_device: int | None, mirror_volume: float = 1.0) -> None:
+         mirror_device: int | None, mirror_volume: float = 1.0,
+         deadline: float | None = None) -> None:
     """Play on the default output — and simultaneously on the built-in speakers
     when mirror_device is set, so idle headphones can't swallow the line.
 
@@ -275,8 +375,10 @@ def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
         if mirror_device is not None:
             procs.append(subprocess.Popen(
                 cmd + ["-a", str(mirror_device), f"[[volm {mirror_volume}]] {text}"]))
-    for p in procs:
-        p.wait()
+    if deadline is None:
+        deadline = time.time() + play_budget(text)
+    if not wait_all(procs, deadline):
+        log.warning("playback overran its budget; cut off: %s", text[:80])
 
 
 def main() -> None:
@@ -313,14 +415,25 @@ def main() -> None:
         if time.time() > expiry:
             log.warning("dropped stale line (%.0fs old): %s", time.time() - born, text)
             return
-        with open(LOCK_FILE, "w") as lock:    # kernel releases on death — can't jam
-            held = grab_lock(lock, min(expiry, time.time() + LOCK_TIMEOUT))
+        # "a+" not "w": opening must not wipe the current holder's record.
+        with open(LOCK_FILE, "a+") as lock:   # kernel releases on death
+            if not grab_lock(lock, expiry):
+                log.warning("dropped line, no turn before it went stale (%.0fs old): %s",
+                            time.time() - born, text)
+                return
+            # The lock wait can span a sleep too: re-check the shelf life after it.
+            if time.time() > expiry:
+                log.warning("dropped stale line (%.0fs old): %s", time.time() - born, text)
+                release_lock(lock)
+                return
+            play_until = time.time() + play_budget(text)
+            claim_lock(lock, play_until + gap)
             log.info("speaking (%s%s%s): %s", "edge" if mp3 else "say",
                      ", soft" if soft else "",
                      f", +speakers@{mirror_volume:.2f}" if mirror_device else "", text)
-            play(text, mp3, tts, soft, mirror_device, mirror_volume)
-            if held:
-                time.sleep(gap)               # breath of silence before the next line
+            play(text, mp3, tts, soft, mirror_device, mirror_volume, play_until)
+            time.sleep(gap)                   # breath of silence before the next line
+            release_lock(lock)
     finally:
         ticket.unlink(missing_ok=True)
         if mp3 is not None:

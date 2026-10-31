@@ -152,14 +152,27 @@ func play(path: String) {
         FileHandle.standardError.write("engine start failed\n".data(using: .utf8)!)
         exit(1)
     }
+    // Never wait on the completion callback alone. When the engine is stopped
+    // under us — system sleep, headphones connecting, the default route moving —
+    // .dataPlayedBack simply never fires, and this process used to hang for days
+    // with its voice worker holding the playback lock, which is what made every
+    // later line talk over every other on wake. So: finish on the callback, on an
+    // engine reconfiguration, or at the file's own length plus slack, whichever
+    // comes first.
     let done = DispatchSemaphore(value: 0)
+    let seconds = Double(file.length) / file.processingFormat.sampleRate
+    let reconfig = NotificationCenter.default.addObserver(
+        forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+    ) { _ in done.signal() }
     player.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { _ in
         done.signal()
     }
     player.play()
-    done.wait()
+    _ = done.wait(timeout: .now() + seconds + 3)
+    NotificationCenter.default.removeObserver(reconfig)
     Thread.sleep(forTimeInterval: 0.1)   // let the tail of the buffer drain
     engine.stop()
+    exit(0)
 }
 
 let args = CommandLine.arguments
