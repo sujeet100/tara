@@ -36,15 +36,15 @@ is awake; that's the known gap the phone layers fill.
 | File | Purpose |
 |------|---------|
 | `brain.py` | Periodic tick: fetch → index → decide → alert (voice/overlay/open/nag), briefing, lunch, fail-loud. |
-| `overlay.swift` → `bin/overlay` | Full-screen "Daybreak" countdown window, one per screen. Themes paint the *calm* sky; at start time every theme cross-fades to a universal burning-red **late palette** with a breathing pulse (visuals escalate like her voice). Progress ring depletes over `--lead` min; `⏎`=Join `esc`=Snooze; shows the platform chip and a Tara line (`--line`, swapped for `--lateline` when overdue); `--snooze <min>` labels the snooze button. All new args optional — old callers work. Recompile: `swiftc -O overlay.swift -o bin/overlay`. |
+| `overlay.swift` → `bin/overlay` | Full-screen "Daybreak" countdown window, one per screen. Themes paint the *calm* sky; at start time every theme cross-fades to a universal burning-red **late palette** with a breathing pulse (visuals escalate like her voice). Progress ring depletes over `--lead` min; `⏎`=Join `esc`=Snooze; shows the platform chip and a Tara line (`--line`, swapped for `--lateline` when overdue); `--snooze <min>` labels the snooze button. `--mode chore` is the BLOCKING screen (see Chores): no snooze, esc swallowed, `--cta <label>` names the "open the thing" button, and it re-orders itself to the front every 3s so it stays immovable without starting a focus war. All new args optional — old callers work. Recompile: `swiftc -O overlay.swift -o bin/overlay`. |
 | `toast.swift` → `bin/toast` | Corner popup (top-right, self-dismissing after `toast.seconds`, click opens the meeting link, never steals focus). The GARNISH channel: Sujit tunes out corner notifications (Rize's popups are in the origin story), so it only ever *accompanies* voice for gentle moments (lead alerts, wrap-up, lunch) and is skipped when the full-screen overlay is up; anything that must land goes through voice + overlay. Recompile: `swiftc -O toast.swift -o bin/toast`. |
 | `miccheck.swift` → `bin/miccheck` | Mic-active join signal. Recompile: `swiftc -O miccheck.swift -o bin/miccheck`. |
 | `camcheck.swift` → `bin/camcheck` | Camera-active join signal (CoreMediaIO). Recompile: `swiftc -O camcheck.swift -o bin/camcheck`. |
 | `displaycheck.swift` → `bin/displaycheck` | Prints `1` if the screen is ON, `0` if it's asleep (CoreGraphics; no permission, captures nothing). **Optional** — the brain falls back to tick-continuity when it's missing, and a missing/failing check always reads as awake so a real alarm can never be muted. Compile: `swiftc -O displaycheck.swift -o bin/displaycheck`. |
 | `remindercheck.swift` → `bin/remindercheck` | Dumps incomplete **Apple Reminders** as JSON (EventKit). Needs a one-time Reminders permission — the prompt only appears because an Info.plist is **linked into the binary**, so recompile with: `swiftc -O remindercheck.swift -o bin/remindercheck -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker remindercheck-info.plist` (a recompile changes the binary's identity → macOS may re-ask once). |
-| `audioroute.swift` → `bin/audioroute` | `check` = JSON of the default output device + transport (spots Bluetooth); `play <file> --device <id>` = play to a SPECIFIC device (afplay can't). Powers speaker mirroring. Recompile: `swiftc -O audioroute.swift -o bin/audioroute`. |
-| `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and swept, and **every wait is bounded** (`wait_turn` deadline, `grab_lock` instead of a blocking flock) — a worker suspended by system sleep used to dam the queue and flush days of obsolete lines on wake. A line that ages past `voice_max_age_sec` before its turn is **dropped unspoken**; tests in `tests/test_voice_queue.py`. Also: **strips emoji** before synthesis ('🌸 Standup' was read as 'cherry blossom standup'); `--soft` = the in-call register (quieter playback AND gentler synthesis: `in_call_voice` volume/rate/pitch); `--incall` = normal voice but no speaker mirroring; **speaker mirroring** = when the default output is Bluetooth and no call is live, the line ALSO plays on the built-in speakers via `bin/audioroute` — headphones on the desk were swallowing announcements (`speaker_mirror.enabled`). |
-| `tests/test_join.py` | Plain-assert tests for `joined_for` (run: `venv/bin/python tests/test_join.py`; same pattern: `test_wrapup.py`, `test_reminders.py`, `test_voice_text.py`, `test_failloud.py`, `test_voice_queue.py`). |
+| `audioroute.swift` → `bin/audioroute` | `check` = JSON of the default output device + transport (spots Bluetooth); `play <file> --device <id> [--volume <0..1>]` = play to a SPECIFIC device (afplay can't); `check` also reports `default_volume`/`builtin_volume` (0 when muted). Powers speaker mirroring. Recompile: `swiftc -O audioroute.swift -o bin/audioroute`. |
+| `voice.py` | Detached per-utterance voice worker. Synthesizes in parallel (edge-tts → `say` fallback) but **serializes playback** via ticket files in `runtime/voiceq/` + an flock on `runtime/voice.lock`, with `voice_gap_sec` of silence between lines — without it, two announcements on one tick (briefing + lead alert) talked over each other. Stale tickets (>5 min) are ignored and swept, and **every wait is bounded** (`wait_turn` deadline, `grab_lock` instead of a blocking flock) — a worker suspended by system sleep used to dam the queue and flush days of obsolete lines on wake. A line that ages past `voice_max_age_sec` before its turn is **dropped unspoken**; tests in `tests/test_voice_queue.py`. Also: **strips emoji** before synthesis ('🌸 Standup' was read as 'cherry blossom standup'); `--soft` = the in-call register (quieter playback AND gentler synthesis: `in_call_voice` volume/rate/pitch); `--incall` = normal voice but no speaker mirroring; **speaker mirroring** = when the default output is Bluetooth and no call is live, the line ALSO plays on the built-in speakers via `bin/audioroute` — headphones on the desk were swallowing announcements (`speaker_mirror.enabled`). The speaker copy plays **low, at a fixed absolute loudness** (`speaker_mirror.volume`, default 0.25): the volume keys only ever move the Bluetooth device, so the speakers sat wherever they were last left — often full — and the mirror boomed into the room. `audioroute check` reports both sliders and the copy plays at target÷speaker-slider (capped at 1), so 0.25 sounds the same whatever the speaker slider says. Following the headphones' level (`"system"`) was tried and he **rejected it as the default**: headphones at full would make the laptop scream too. Leave the speaker slider high and unmuted; Tara scales down from it. She deliberately never *sets* the speaker volume — a worker killed mid-line by sleep would leave the system changed. |
+| `tests/test_join.py` | Plain-assert tests for `joined_for` (run: `venv/bin/python tests/test_join.py`; same pattern: `test_wrapup.py`, `test_reminders.py`, `test_voice_text.py`, `test_failloud.py`, `test_voice_queue.py`, `test_chores.py`, `test_speaker_mirror.py`). |
 | `menubar.py` | 🌸 menu-bar health + Preferences. |
 | `phrases.json` | Persona lines, ~20 per situation, picked at random. |
 | `config.json` | All settings. Brain re-reads it every tick. |
@@ -84,6 +84,30 @@ customise via `config.json` — name, assistant_name, voice — and `phrases.jso
 
 **Wrap-up warning** (July 2026): voice-only nudge ~5 min before the *current* meeting ends — "about 5 minutes left, {next} is at {time}" — the mirror image of the join nag, for back-to-back days. Deliberately narrow so it never becomes noise: once per meeting, only if he's actually in it (acked, or mic/cam/Zoom live), and only when another meeting starts within `wrap_up.next_within_min` of this one ending; if nothing follows, overrunning is his call and Tara stays quiet. Config `wrap_up` {enabled, lead_min, next_within_min}; phrases in `wrap_up`; tests in `tests/test_wrapup.py`.
 
+**Chores — the one thing that blocks the screen (Sept 2026, he asked for it):** a
+chore is not a task. Apple Reminders holds what he *chooses* to be reminded of;
+a chore is a recurring obligation someone else is waiting on — the Friday
+timesheet — where "I'll do it later" is the entire failure mode. So a chore
+escalates past voice into the only channel he can't work around. `maybe_chores()`
+walks a ladder timed from the due moment: gentle at `time`, firm at
+`+nag_every_min`, upset at `+2×`, and at `+block_after_min` a full-screen
+`--mode chore` overlay that brain.py **relaunches every tick** until it's acked,
+so closing it buys a minute at most.
+
+Two rules keep it from being tyranny rather than help, and both matter. **The
+block is a gate, not a cage:** the overlay's "Open Sadhak" button opens the link
+and writes `open` (not `ack`), which stands Tara down for `grace_min` so he can
+actually fill the thing in — blocking a screen he then can't use would be
+theatre, and would teach him to kill the process instead of doing the work. And
+**a live meeting outranks a chore:** the block is deferred while any meeting
+overlay is up or a call is live, landing the moment he's free. Ladder tiers climb
+with elapsed time rather than attempt count, so a lid opened at noon on Friday
+gets the block, not a fresh "gentle" nudge. Outside `work_hours` nothing fires,
+so an unsubmitted timesheet never blocks his Saturday — it returns next Friday.
+Phrases: `chore_due` / `chore_firm` / `chore_upset` / `chore_blocked` /
+`chore_overlay_line`, the last three in `always_name`. Tests:
+`tests/test_chores.py`. Preview it safely: `./preview-theme.sh chore`.
+
 **Lunch:** he forgets lunch when meetings sneak up. Nudge him at the **last good gap before an afternoon meeting** ("free until your 2 PM — go eat now"). Window `12:30–14:00`, min gap 20 min. If back-to-back through lunch, one caring "don't skip lunch" warning.
 
 **Task reminders (July 2026):** Apple Reminders is the task store — he adds tasks by voice from phone/watch ("Hey Siri, remind me…"), and **recurring reminders cover scheduled chores** (timesheet every Friday, feedback cycles) since each occurrence comes back with a fresh `id@due` key. `bin/remindercheck` dumps incomplete reminders each tick; a **timed** task gets one spoken line as it comes due + one follow-up (`follow_up_min`) if still incomplete — completing it in Reminders is the ack. Tasks that came due long ago (`window_min`, Mac asleep) are marked **stale silently** — never greet him with a barrage of ancient nags; the briefing covers them instead (due-today list + one overdue line). **Date-only tasks never fire a timed alert**, they belong to the briefing. `fetch_reminders` returns **None** (not `[]`) when access fails, so a TCC hiccup can't wipe announce-state; failures back off `retry_fail_min`. Tests: `tests/test_reminders.py`.
@@ -101,18 +125,21 @@ customise via `config.json` — name, assistant_name, voice — and `phrases.jso
 `overlay_lead_min` (default 3; brain adds +0.5 min slack so a 60s tick can't slip it a minute late),
 `voice_gap_sec` (silence between queued announcements), `overdue_nag_minutes`, `overlay_theme`, `lunch` {enabled, earliest,
 latest, min_minutes}, `rsvp` {accepted/needs_action/tentative/declined → full|remind|skip},
+`chores` [{id, enabled, title, weekday, time, url, cta, nag_every_min,
+block_after_min, grace_min}],
 `work_hours`, `briefing_time`, `fetch_interval_sec`, `fetch_timeout_sec` (read budget
 for the ~12 MB feed), `voice_max_age_sec` (queued line older than this is dropped),
 `wake_grace_min` (the brain must be continuously ticking this long before the fail-loud
 alarm may fire — also what keeps a dark-waking, lid-shut Mac silent), `stale_alert_after_min`,
 `in_call_voice` {enabled, volume 0–1, edge_volume/edge_rate/edge_pitch — the soft in-call register},
-`speaker_mirror` {enabled — mirror to built-in speakers when output is Bluetooth and no call is live},
+`speaker_mirror` {enabled — mirror to built-in speakers when output is Bluetooth and no call is live, volume 0–1 = absolute speaker loudness (default 0.25), or "system" to match the headphones},
 `reminders` {enabled, lists ([] = all), window_min, follow_up_min, retry_fail_min}.
 
 ## How to extend
 
 - **New phrase category:** add an array to `phrases.json` (aim for ~20), call `pick("category", cfg, **kw)`. Placeholders: `{name} {assistant} {title} {mins} {time} {n} {meetings}`. Add to `always_name` in `brain.py` if it must always include his name.
 - **New theme:** add to `THEMES` in `overlay.swift` (top/bottom/accent/glow — this is the *calm* sky only; the late palette is universal, don't add per-theme late variants), recompile, then add to `THEMES` in `menubar.py` and the `all` loop in `preview-theme.sh`.
+- **New chore:** append to `chores` in `config.json` ({id, title, weekday, time, url, cta, nag_every_min, block_after_min, grace_min}) — no code needed. Reach for one only when the thing genuinely warrants taking the screen; everything softer belongs in Apple Reminders.
 - **New output channel** (e.g. phone push): channels are just functions called from the tick — add alongside `speak()` / `launch_overlay()` / `show_toast()`.
 - After editing `brain.py`/`phrases.json`: no restart needed (each tick is a fresh process). After editing `menubar.py` or `overlay.swift`: `launchctl kickstart -k gui/$(id -u)/com.tara-assistant.menubar` and/or recompile.
 

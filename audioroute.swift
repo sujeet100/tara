@@ -3,9 +3,13 @@
 //   audioroute check
 //     JSON snapshot of output routing, e.g.
 //     {"default_id":73,"default_name":"WH-1000XM4","default_transport":"bluetooth",
-//      "builtin_id":52,"builtin_name":"MacBook Pro Speakers"}
+//      "builtin_id":52,"builtin_name":"MacBook Pro Speakers",
+//      "default_volume":0.31,"builtin_volume":1.0}
 //     voice.py uses default_transport to spot the "Bluetooth headphones are
-//     connected but maybe lying on the desk" trap.
+//     connected but maybe lying on the desk" trap, and the two volumes (0–1, 0
+//     when muted, omitted when the device has no volume control) to play the
+//     speaker mirror at the loudness the volume keys are set to — the keys only
+//     move the default device, so the speakers' own level can't be trusted.
 //
 //   audioroute play <file> [--device <id>] [--volume <0..1>]
 //     Play an audio file to a SPECIFIC output device (afplay can only use the
@@ -80,6 +84,26 @@ func transportLabel(_ dev: AudioDeviceID) -> String {
     }
 }
 
+/// The output volume the menu-bar slider shows, 0 when muted. Devices expose it
+/// either on the main element or only per channel, so fall back to averaging L/R.
+func outputVolume(_ dev: AudioDeviceID) -> Float? {
+    func scalar(_ element: UInt32) -> Float? {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
+                                              mScope: kAudioObjectPropertyScopeOutput,
+                                              mElement: element)
+        guard AudioObjectHasProperty(dev, &addr) else { return nil }
+        var val = Float32(0)
+        var size = UInt32(MemoryLayout<Float32>.size)
+        return AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &val) == noErr ? val : nil
+    }
+    let channels = [scalar(1), scalar(2)].compactMap { $0 }
+    guard let vol = scalar(kAudioObjectPropertyElementMain)
+            ?? (channels.isEmpty ? nil : channels.reduce(0, +) / Float(channels.count))
+    else { return nil }
+    let muted = getUInt32(dev, kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput)
+    return muted == 1 ? 0 : vol
+}
+
 func jsonEscape(_ s: String) -> String {
     s.replacingOccurrences(of: "\\", with: "\\\\")
      .replacingOccurrences(of: "\"", with: "\\\"")
@@ -91,10 +115,12 @@ func check() {
         fields.append("\"default_id\":\(dev)")
         fields.append("\"default_name\":\"\(jsonEscape(deviceName(dev)))\"")
         fields.append("\"default_transport\":\"\(transportLabel(dev))\"")
+        if let v = outputVolume(dev) { fields.append("\"default_volume\":\(v)") }
     }
     if let builtin = allDevices().first(where: { hasOutput($0) && transportLabel($0) == "builtin" }) {
         fields.append("\"builtin_id\":\(builtin)")
         fields.append("\"builtin_name\":\"\(jsonEscape(deviceName(builtin)))\"")
+        if let v = outputVolume(builtin) { fields.append("\"builtin_volume\":\(v)") }
     }
     print("{\(fields.joined(separator: ","))}")
 }

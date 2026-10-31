@@ -35,7 +35,9 @@ Speaker mirroring: when the default output is a BLUETOOTH device and no call is
 live, the same audio is also played on the built-in speakers (bin/audioroute).
 Headphones that are connected but lying on the desk were silently swallowing
 announcements — the exact failure mode this app exists to kill. Config
-`speaker_mirror.enabled` turns it off.
+`speaker_mirror.enabled` turns it off. `speaker_mirror.volume` (0–1, default
+0.25) is how loud the speakers come out, whatever their own slider says — the
+volume keys never reach them; "system" matches the headphones' level instead.
 
 Emoji are stripped before synthesis — '🌸 Standup' was being read as
 'cherry blossom standup'.
@@ -79,6 +81,8 @@ DEFAULT_TTS = {
     "say_voice": "Tara",
     "say_rate": 175,
 }
+
+DEFAULT_MIRROR_VOLUME = 0.25  # a backstop for idle headphones, not a PA system
 
 DEFAULT_SOFT = {
     "volume": 0.35,        # playback multiplier while he's on a call
@@ -146,8 +150,8 @@ def synthesize(text: str, tts: dict, soft: dict | None) -> Path | None:
     return None
 
 
-def mirror_target(cfg: dict, in_call: bool) -> int | None:
-    """Built-in speaker device id to mirror onto, or None.
+def mirror_target(cfg: dict, in_call: bool) -> tuple[int, float] | None:
+    """(built-in speaker device id, playback level) to mirror onto, or None.
 
     Mirror only when the default output is Bluetooth (headphones that may be on
     the desk rather than on the head) and no call is live — mid-call the voice
@@ -165,7 +169,36 @@ def mirror_target(cfg: dict, in_call: bool) -> int | None:
     if info.get("default_transport") != "bluetooth":
         return None
     builtin = info.get("builtin_id")
-    return builtin if builtin and builtin != info.get("default_id") else None
+    if not builtin or builtin == info.get("default_id"):
+        return None
+    return builtin, mirror_level(cfg, info)
+
+
+def mirror_level(cfg: dict, route: dict) -> float:
+    """Playback level, 0–1, for the speaker copy of a line.
+
+    The volume keys only move the default device (the headphones), so the
+    speakers sit wherever they were last left — often full, which made the
+    mirror boom. So the setting is an ABSOLUTE target loudness for the speakers
+    (default 0.25), reached by scaling against their own slider: 0.25 sounds the
+    same whether that slider is at half or full. It deliberately does not follow
+    the headphones by default — headphones at full would mean a laptop at full.
+    "system" opts into following them anyway. A speaker slider below the target
+    can't be boosted (the level caps at 1), and a muted one can't be heard."""
+    setting = cfg.get("speaker_mirror", {}).get("volume", DEFAULT_MIRROR_VOLUME)
+    if setting == "system":
+        target = route.get("default_volume")
+    else:
+        try:
+            target = min(max(float(setting), 0.0), 1.0)
+        except (TypeError, ValueError):
+            target = DEFAULT_MIRROR_VOLUME
+    have = route.get("builtin_volume")
+    if target is None:
+        target = DEFAULT_MIRROR_VOLUME
+    if not have:                  # slider unknown (or muted): best we can do
+        return target
+    return min(max(target / have, 0.0), 1.0)
 
 
 def sweep_queue() -> None:
@@ -213,9 +246,14 @@ def grab_lock(lock, deadline: float) -> bool:
 
 
 def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
-         mirror_device: int | None) -> None:
+         mirror_device: int | None, mirror_volume: float = 1.0) -> None:
     """Play on the default output — and simultaneously on the built-in speakers
-    when mirror_device is set, so idle headphones can't swallow the line."""
+    when mirror_device is set, so idle headphones can't swallow the line.
+
+    The speaker copy is attenuated by mirror_volume: the volume keys only move
+    the default device (the headphones), so the built-in speakers sit at
+    whatever level they were last left at — often full — and the mirror used
+    to boom into the room."""
     procs = []
     if mp3 is not None:
         cmd = ["/usr/bin/afplay"]
@@ -225,7 +263,7 @@ def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
         if mirror_device is not None:
             procs.append(subprocess.Popen(
                 [str(AUDIOROUTE_BIN), "play", str(mp3),
-                 "--device", str(mirror_device)],
+                 "--device", str(mirror_device), "--volume", str(mirror_volume)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     else:
         say_text = f"[[volm {soft['volume']}]] {text}" if soft else text
@@ -235,7 +273,8 @@ def play(text: str, mp3: Path | None, tts: dict, soft: dict | None,
                "-r", str(rate)]
         procs.append(subprocess.Popen(cmd + [say_text]))
         if mirror_device is not None:
-            procs.append(subprocess.Popen(cmd + ["-a", str(mirror_device), say_text]))
+            procs.append(subprocess.Popen(
+                cmd + ["-a", str(mirror_device), f"[[volm {mirror_volume}]] {text}"]))
     for p in procs:
         p.wait()
 
@@ -255,7 +294,7 @@ def main() -> None:
     gap = float(cfg.get("voice_gap_sec", 1.5))
     max_age = float(cfg.get("voice_max_age_sec", DEFAULT_MAX_AGE_SEC))
     expiry = born + max_age
-    mirror_device = mirror_target(cfg, in_call)
+    mirror_device, mirror_volume = mirror_target(cfg, in_call) or (None, 1.0)
 
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     sweep_queue()
@@ -278,8 +317,8 @@ def main() -> None:
             held = grab_lock(lock, min(expiry, time.time() + LOCK_TIMEOUT))
             log.info("speaking (%s%s%s): %s", "edge" if mp3 else "say",
                      ", soft" if soft else "",
-                     ", +speakers" if mirror_device else "", text)
-            play(text, mp3, tts, soft, mirror_device)
+                     f", +speakers@{mirror_volume:.2f}" if mirror_device else "", text)
+            play(text, mp3, tts, soft, mirror_device, mirror_volume)
             if held:
                 time.sleep(gap)               # breath of silence before the next line
     finally:

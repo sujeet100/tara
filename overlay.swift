@@ -10,12 +10,20 @@
 // the interrupt lands wherever you're looking. ⏎ joins, esc snoozes.
 //
 // On a button press it writes the user's choice to <runtime>/<id>.choice
-//   join | ack | snooze:<min>   then exits.
+//   join | ack | snooze:<min> | open   then exits.
+//
+// `chore` mode is the blocking one: a scheduled obligation (the Friday
+// timesheet) that has run out of patience. It has NO snooze and no escape —
+// only "open the thing" and "I've done it" — and brain.py relaunches it every
+// tick until the chore is acked, so closing it buys at most a minute. It is a
+// GATE, not a cage: choosing to open the link writes `open` and quits, which
+// tells the brain to stand back for a grace period so the work is actually
+// possible. Blocking a screen you then can't use would be theatre.
 //
 // Args: --id <id> --title <t> --start <iso8601> --url <u>
-//       --mode meeting|error --theme <name> --runtime <dir>
-//       --lead <min> --snooze <min> --line <text> --lateline <text>
-// The last four are optional (older callers, preview-theme.sh, still work).
+//       --mode meeting|error|chore --theme <name> --runtime <dir>
+//       --lead <min> --snooze <min> --line <text> --lateline <text> --cta <label>
+// All but the first four are optional (older callers, preview-theme.sh, work).
 
 import AppKit
 import Foundation
@@ -36,6 +44,7 @@ let leadMin = Double(arg("--lead") ?? "") ?? 3
 let snoozeMin = Int(arg("--snooze") ?? "") ?? 2
 let taraLine = arg("--line") ?? ""
 let taraLateLine = arg("--lateline") ?? ""
+let ctaLabel = arg("--cta") ?? "Open link"
 let startDate: Date? = {
     guard let s = arg("--start") else { return nil }
     let f = ISO8601DateFormatter()
@@ -98,10 +107,17 @@ let LATE_BOTTOM = rgb(0.66, 0.20, 0.10)
 let LATE_ACCENT = rgb(1.00, 0.58, 0.38)
 let LATE_GLOW = rgb(1.00, 0.42, 0.16)
 
-let theme = (mode == "error")
-    ? Theme(top: rgb(0.42, 0.04, 0.05), bottom: rgb(0.66, 0.10, 0.10),
-            accent: rgb(1.0, 0.85, 0.30), glow: rgb(1.0, 0.5, 0.2))
-    : (THEMES[themeName] ?? THEMES["midnight"]!)
+let theme: Theme = {
+    if mode == "error" {
+        return Theme(top: rgb(0.42, 0.04, 0.05), bottom: rgb(0.66, 0.10, 0.10),
+                     accent: rgb(1.0, 0.85, 0.30), glow: rgb(1.0, 0.5, 0.2))
+    }
+    if mode == "chore" {   // an alarm, so it wears the universal late palette
+        return Theme(top: LATE_TOP, bottom: LATE_BOTTOM,
+                     accent: LATE_ACCENT, glow: LATE_GLOW)
+    }
+    return THEMES[themeName] ?? THEMES["midnight"]!
+}()
 
 // ----------------------------------------------------------------------------
 // Actions are global — with one window per screen, any window's button acts
@@ -116,6 +132,14 @@ enum Act {
     static func imIn() { writeChoice("ack"); NSApp.terminate(nil) }
     static func snooze() { writeChoice("snooze:\(snoozeMin)"); NSApp.terminate(nil) }
     static func dismiss() { writeChoice("ack"); NSApp.terminate(nil) }
+    /// Step aside so the work is possible. `open` is NOT an ack: the brain grants
+    /// a grace period and puts the block straight back if nothing was submitted.
+    static func openLink() {
+        if !urlStr.isEmpty, let u = URL(string: urlStr) { NSWorkspace.shared.open(u) }
+        writeChoice("open")
+        NSApp.terminate(nil)
+    }
+    static func done() { writeChoice("ack"); NSApp.terminate(nil) }
 }
 
 final class KeyWindow: NSWindow {
@@ -141,6 +165,8 @@ final class HoverButton: NSButton {
 final class OverlayController: NSObject {
     let window: NSWindow
     let isError = (mode == "error")
+    let isChore = (mode == "chore")
+    var frontTicks = 0
 
     let kicker = NSTextField(labelWithString: "")
     let digits = NSTextField(labelWithString: "")
@@ -371,6 +397,60 @@ final class OverlayController: NSObject {
             return
         }
 
+        if isChore {
+            let icon = NSTextField(labelWithString: "⏳")
+            icon.font = NSFont.systemFont(ofSize: 78)
+
+            let heading = NSTextField(labelWithString: title)
+            heading.font = rounded(54, .bold)
+            heading.textColor = .white
+            heading.alignment = .center
+            heading.lineBreakMode = .byWordWrapping
+            heading.maximumNumberOfLines = 2
+
+            tara.stringValue = taraLine
+            tara.font = NSFont.systemFont(ofSize: 21, weight: .regular).withItalics()
+            tara.textColor = NSColor(white: 1, alpha: 0.9)
+            tara.alignment = .center
+            tara.lineBreakMode = .byWordWrapping
+            tara.maximumNumberOfLines = 2
+            tara.isHidden = taraLine.isEmpty
+
+            let buttons = NSStackView()
+            buttons.orientation = .horizontal
+            buttons.spacing = 22
+            if !urlStr.isEmpty {
+                buttons.addArrangedSubview(makeButton(ctaLabel, #selector(openA), filled: true))
+            }
+            buttons.addArrangedSubview(makeButton("I've submitted", #selector(doneA), filled: false))
+
+            // No snooze and no esc: this is the one screen Tara won't let you wave
+            // away. ⏎ opens the link, because the way out is through.
+            let keys = NSStackView(views: [keyHint("⏎", ctaLabel)])
+            keys.orientation = .horizontal
+            keys.spacing = 26
+
+            var views: [NSView] = [icon, heading]
+            if !urlStr.isEmpty, let host = URL(string: urlStr)?.host {
+                views.append(chip(host))
+            }
+            views += [buttons, tara, keys]
+            let stack = NSStackView(views: views)
+            stack.orientation = .vertical
+            stack.spacing = 24
+            stack.alignment = .centerX
+            stack.setCustomSpacing(34, after: buttons)
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+                stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+                stack.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor,
+                                             multiplier: 0.86),
+            ])
+            return
+        }
+
         kicker.attributedStringValue = capsLabel("Starting soon", size: 15, alpha: 0.75)
             .attributedStringValue
         kicker.alignment = .center
@@ -446,6 +526,14 @@ final class OverlayController: NSObject {
     }
 
     func updateCountdown() {
+        if isChore {
+            // Re-assert every few seconds so the block stays in front of whatever
+            // he switches to. Not every tick — a focus tug-of-war would make the
+            // machine unusable, and the point is to be immovable, not hostile.
+            frontTicks += 1
+            if frontTicks % 3 == 0 { window.orderFrontRegardless() }
+            return
+        }
         guard !isError, let start = startDate else { return }
         let secs = Int(start.timeIntervalSinceNow)
         let m = abs(secs) / 60, s = abs(secs) % 60
@@ -522,6 +610,8 @@ final class OverlayController: NSObject {
     @objc func imInA() { Act.imIn() }
     @objc func snoozeA() { Act.snooze() }
     @objc func dismissA() { Act.dismiss() }
+    @objc func openA() { Act.openLink() }
+    @objc func doneA() { Act.done() }
 }
 
 extension NSFont {
@@ -541,6 +631,11 @@ let controllers = NSScreen.screens.map { OverlayController(screen: $0) }
 NSEvent.addLocalMonitorForEvents(matching: .keyDown) { ev in
     if mode == "error" {
         if ev.keyCode == 36 || ev.keyCode == 53 { Act.dismiss(); return nil }
+        return ev
+    }
+    if mode == "chore" {
+        if ev.keyCode == 36 || ev.keyCode == 76 { Act.openLink(); return nil }
+        if ev.keyCode == 53 { return nil }      // esc is swallowed: no way out here
         return ev
     }
     switch ev.keyCode {

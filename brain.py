@@ -109,6 +109,8 @@ DEFAULT_CONFIG = {
     "speaker_mirror": {               # Bluetooth headphones on the desk swallow
         "enabled": True,              # announcements — mirror to built-in speakers
     },                                # when default output is BT and no call is live
+    "chores": [],                     # scheduled obligations that escalate to a
+                                      # screen block — see maybe_chores()
     "reminders": {                    # Apple Reminders → spoken task nudges
         "enabled": True,
         "lists": [],                  # limit to these list names ([] = all lists)
@@ -231,7 +233,8 @@ def pick(category: str, cfg: dict, **kw) -> str:
     # When she's annoyed, ALWAYS use the name. Otherwise use it only "every now and
     # then" — if a name line was picked but we're over budget, prefer a no-name one.
     always_name = category in ("overdue_firm", "overdue_upset", "briefing_greeting",
-                               "overlay_line_late")
+                               "overlay_line_late", "chore_upset", "chore_blocked",
+                               "chore_overlay_line")
     if "{name}" in template and not always_name and random.random() > cfg.get("name_frequency", 0.4):
         alts = [o for o in options if "{name}" not in o]
         if alts:
@@ -279,7 +282,7 @@ def open_url(url: str) -> None:
 def launch_overlay(safe_id: str, title: str, start_iso: str, url: str,
                    mode: str = "meeting", theme: str = "midnight",
                    lead_min: float = 3, snooze_min: int = 2,
-                   line: str = "", late_line: str = "") -> int | None:
+                   line: str = "", late_line: str = "", cta: str = "") -> int | None:
     overlay = BIN / "overlay"
     if not overlay.exists():
         log.warning("overlay binary missing; voice-only")
@@ -291,7 +294,7 @@ def launch_overlay(safe_id: str, title: str, start_iso: str, url: str,
              "--url", url or "", "--mode", mode, "--theme", theme,
              "--runtime", str(RUNTIME),
              "--lead", str(lead_min), "--snooze", str(snooze_min),
-             "--line", line, "--lateline", late_line],
+             "--line", line, "--lateline", late_line, "--cta", cta or "Open link"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,   # detach: survives this tick exiting
         )
@@ -705,6 +708,135 @@ def maybe_reminders(rems: list[dict], state: dict, cfg: dict, now: datetime,
 
 
 # --------------------------------------------------------------------------- #
+# chores — scheduled obligations that escalate all the way to a screen block
+# --------------------------------------------------------------------------- #
+# Apple Reminders covers the tasks Sujit CHOOSES to be reminded of. A chore is
+# the other kind: a recurring obligation someone else is waiting on (the Friday
+# timesheet), where "I'll do it later" is the whole failure mode. So a chore
+# escalates past voice into the one channel he can't work around — it takes the
+# screen. The block is a GATE, not a cage: opening the link stands Tara down for
+# `grace_min` so the work is actually possible, and she returns if nothing was
+# submitted. A block you can't work behind would just teach him to kill the
+# process.
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday",
+            "saturday", "sunday"]
+
+
+def chore_due_at(chore: dict, now: datetime) -> datetime | None:
+    """When this chore came due today, or None if today isn't its day."""
+    want = str(chore.get("weekday", "")).strip().lower()
+    if want not in WEEKDAYS or WEEKDAYS[now.weekday()] != want:
+        return None
+    try:
+        t = datetime.strptime(chore.get("time", "10:00"), "%H:%M").time()
+    except ValueError:
+        return None
+    return now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+
+
+def chore_plan(due: datetime, now: datetime, rec: dict, *,
+               nag_every_min: float, block_after_min: float) -> tuple[bool, str | None]:
+    """What this chore needs THIS tick: (should_block, phrase category or None).
+
+    Pure, so the escalation ladder is testable without a screen. The tiers climb
+    with time rather than with attempt count, which matters after the Mac has
+    been asleep: opening the lid at noon on Friday should land her where she'd
+    have got to by noon, not restart her at 'gentle'."""
+    over = (now - due).total_seconds() / 60
+    if over < 0:
+        return (False, None)
+    should_block = over >= block_after_min
+    last = rec.get("spoke")
+    # half a tick of slack so a 60s tick can't skip a nag by a second
+    if last and (now - datetime.fromisoformat(last)).total_seconds() / 60 < nag_every_min - 0.5:
+        return (should_block, None)
+    if should_block:
+        return (True, "chore_blocked")
+    # the same half-tick of slack, so a rung that arrives a few seconds early
+    # counts as that rung rather than repeating the previous one
+    tier = int((over + 0.5) // nag_every_min)
+    return (False, "chore_due" if tier == 0 else
+                   "chore_firm" if tier == 1 else "chore_upset")
+
+
+def maybe_chores(state: dict, cfg: dict, now: datetime, in_call: bool) -> None:
+    """Nag, then block, until the chore is acked. One record per occurrence."""
+    bucket = state.setdefault("chores", {})
+    # Something already owns the screen for a MEETING — that outranks any chore,
+    # and two full-screen windows fighting would be worse than either alone.
+    busy = any(pid_alive(r.get("pid"))
+               for k, r in state.get("overlay", {}).items()
+               if k != ERROR_KEY and not k.startswith("chore:"))
+    for chore in cfg.get("chores", []):
+        if not chore.get("enabled", True):
+            continue
+        cid = chore.get("id") or chore.get("title", "chore")
+        slot = f"chore:{cid}"
+        due = chore_due_at(chore, now)
+        if due is None:
+            continue
+        key = f"{cid}@{now.date().isoformat()}"
+        rec = bucket.setdefault(key, {})
+
+        # The overlay's own answer, read before anything else this tick.
+        choice = read_choice(safe_id(key))
+        if choice == "ack":
+            rec["acked"] = now.isoformat()
+            log.info("chore acked: %r", cid)
+        elif choice == "open":
+            grace = float(chore.get("grace_min", 10))
+            rec["grace_until"] = (now + timedelta(minutes=grace)).isoformat()
+            log.info("chore %r: link opened, standing back %g min", cid, grace)
+
+        if rec.get("acked"):
+            kill_overlay(state.get("overlay", {}).pop(slot, {}).get("pid"))
+            continue
+        if now < due or not within_work_hours(now, cfg):
+            continue   # not yet, or the day is over — it returns next week
+
+        graced = rec.get("grace_until") and now < datetime.fromisoformat(rec["grace_until"])
+        if graced:
+            kill_overlay(state.get("overlay", {}).pop(slot, {}).get("pid"))
+            continue
+
+        should_block, category = chore_plan(
+            due, now, rec,
+            nag_every_min=float(chore.get("nag_every_min", 15)),
+            block_after_min=float(chore.get("block_after_min", 45)))
+
+        title = chore.get("title", cid)
+        if category:
+            rec["spoke"] = now.isoformat()
+            speak(pick(category, cfg, title=title), cfg, in_call=in_call)
+            if not should_block and not busy:
+                show_toast(title, chore.get("url", ""), cfg, url=chore.get("url", ""))
+            log.info("chore %r: %s", cid, category)
+
+        if not should_block:
+            continue
+        if busy or in_call:
+            # Never take the screen out from under a live meeting. The chore isn't
+            # forgotten — it blocks the moment he's free.
+            log.info("chore %r: block deferred (meeting in progress)", cid)
+            continue
+        rec_ov = state.setdefault("overlay", {}).get(slot, {})
+        if not pid_alive(rec_ov.get("pid")):
+            pid = launch_overlay(safe_id(key), title, now.isoformat(),
+                                 chore.get("url", ""), mode="chore",
+                                 theme=cfg.get("overlay_theme", "midnight"),
+                                 line=pick("chore_overlay_line", cfg, title=title),
+                                 cta=chore.get("cta", "Open link"))
+            state["overlay"][slot] = {"pid": pid, "launched": now.isoformat()}
+            log.info("chore %r: screen blocked", cid)
+
+    # yesterday's occurrences (and any chore removed from config) fall away
+    today = now.date().isoformat()
+    for k in list(bucket):
+        if not k.endswith(f"@{today}"):
+            bucket.pop(k)
+
+
+# --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
 def safe_id(key: str) -> str:
@@ -1056,6 +1188,7 @@ def tick() -> None:
     if reminders is not None:
         maybe_reminders(reminders, state, cfg, now, in_call)
     maybe_wrapup(events, state, cfg, now, in_call=in_call)
+    maybe_chores(state, cfg, now, in_call)
 
     live_keys = set()
     for ev in events:
@@ -1174,7 +1307,7 @@ def tick() -> None:
     # prune state for events no longer in window
     for bucket in ("fired", "overlay", "acked", "snooze", "opened", "wrapup"):
         for k in list(state[bucket]):
-            if k not in live_keys and k != ERROR_KEY:
+            if k not in live_keys and k != ERROR_KEY and not k.startswith("chore:"):
                 # keep recently-acked briefly to avoid re-alerting; drop the rest
                 state[bucket].pop(k, None)
 
